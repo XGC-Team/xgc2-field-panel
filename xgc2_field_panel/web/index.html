@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Scout 机载面板</title>
+  <style>
+    :root { font-family: sans-serif; color: #111; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      background: #e8e8e8;
+      min-height: 100%;
+      min-height: 100dvh;
+    }
+    .page {
+      width: 720px;
+      max-width: 100%;
+      max-height: 760px;
+      margin: 0;
+      padding: 8px;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      gap: 6px;
+      overflow: auto;
+      background: #f4f4f4;
+      box-sizing: border-box;
+    }
+    h1 { font-size: clamp(15px, 2.2vh, 18px); margin: 0; }
+    h2 { font-size: clamp(13px, 1.8vh, 15px); margin: 0 0 6px; }
+    section {
+      background: #fff;
+      border: 1px solid #ccc;
+      padding: 8px 10px;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #status { overflow: auto; }
+    .head { display: flex; align-items: center; gap: 10px; min-height: 0; }
+    .head h1 { flex: 0 0 auto; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+    .fields {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px 10px;
+      align-items: center;
+    }
+    .field { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .field label { flex: 0 0 56px; font-size: 12px; }
+    .field input { flex: 1 1 auto; min-width: 0; width: 100%; padding: 3px 6px; font-size: 16px; }
+    .actions { display: flex; align-items: center; }
+    .actions button { min-width: 88px; }
+    button {
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 14px;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.danger { background: #b00020; color: #fff; border: 0; }
+    button.go { background: #0b6; color: #fff; border: 0; font-size: 15px; padding: 8px 14px; }
+    table { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: clamp(11px, 1.5vh, 13px); }
+    th:nth-child(1) { width: 7em; }
+    th:nth-child(2) { width: 4.2em; }
+    th:nth-child(3), th:nth-child(4), th:nth-child(5) { width: 9ch; }
+    td, th { border-bottom: 1px solid #ddd; padding: 3px 6px; text-align: left; white-space: nowrap; overflow: hidden; }
+    td.num, th.num { text-align: right; }
+    .ok { color: #0a6; font-weight: 700; }
+    .bad { color: #b00; font-weight: 700; }
+    .control-body { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+    .control-main { flex: 1 1 180px; min-width: 0; }
+    .pad { display: grid; grid-template-columns: repeat(3, minmax(56px, 72px)); gap: 8px; }
+    .note { font-size: 11px; color: #555; margin: 4px 0 0; }
+    #msg {
+      flex: 1 1 auto;
+      min-height: 0;
+      font-size: 12px;
+      padding: 4px 8px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #msg.ok { background: #e8f7ee; color: #064; }
+    #msg.bad { background: #fde8e8; color: #800; font-weight: 700; }
+    #mode { font-size: 14px; }
+    #teleop.locked, #params.locked { opacity: 0.45; pointer-events: none; }
+    .pad button {
+      min-height: 44px;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: none;
+    }
+    .pad button.pressed {
+      background: #0b6;
+      color: #fff;
+      border: 2px solid #064;
+    }
+    .num {
+      font-variant-numeric: tabular-nums;
+      font-family: "DejaVu Sans Mono", "Liberation Mono", ui-monospace, monospace;
+      white-space: pre;
+      text-align: right;
+    }
+    @media (max-width: 900px) {
+      .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 720px) {
+      html, body {
+        height: 100%;
+        height: 100dvh;
+        overflow: hidden;
+      }
+      .page {
+        width: 100%;
+        max-width: 100%;
+        height: 100dvh;
+        max-height: 100dvh;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 6px;
+        padding-left: calc(6px + env(safe-area-inset-left));
+        padding-right: calc(6px + env(safe-area-inset-right));
+        padding-bottom: calc(6px + env(safe-area-inset-bottom));
+        overflow: hidden;
+      }
+      .head { order: 1; flex: 0 0 auto; gap: 6px; }
+      #control { order: 2; flex: 0 0 auto; }
+      #params { order: 3; flex: 0 0 auto; }
+      #status { order: 4; flex: 1 1 auto; min-height: 0; overflow: auto; }
+      h1 { font-size: 15px; }
+      h2 { font-size: 12px; margin: 0 0 4px; }
+      section { padding: 6px 8px; overflow: hidden; }
+      #msg { font-size: 11px; padding: 2px 6px; white-space: nowrap; }
+      .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 8px; }
+      .field label { flex: 0 0 52px; font-size: 12px; }
+      .field input { font-size: 16px; padding: 4px 6px; }
+      .actions { width: auto; }
+      .actions button { width: auto; min-width: 72px; min-height: 36px; font-size: 13px; }
+      .control-body {
+        flex-direction: row;
+        flex-wrap: nowrap;
+        align-items: center;
+        gap: 8px;
+      }
+      .control-main { flex: 0 0 auto; }
+      .row { width: auto; gap: 6px; }
+      .row .go, .row .danger {
+        flex: 0 0 auto;
+        min-height: 44px;
+        min-width: 64px;
+        font-size: 15px;
+        white-space: nowrap;
+        padding: 6px 12px;
+      }
+      #teleop { flex: 1 1 auto; }
+      .pad {
+        width: 168px;
+        max-width: 168px;
+        margin: 0;
+        gap: 4px;
+        grid-template-columns: repeat(3, 52px);
+      }
+      .pad button { min-height: 40px; font-size: 13px; padding: 0; }
+      .note { display: none; }
+      table { font-size: 11px; }
+      td, th { padding: 2px 4px; }
+      th:nth-child(1) { width: 5.5em; }
+      th:nth-child(2) { width: 3.2em; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="head">
+    <h1>Scout 机载面板</h1>
+    <div id="msg"></div>
+  </div>
+
+  <section id="params">
+    <h2>参数</h2>
+    <div class="fields">
+      <div class="field"><label>动捕 IP</label><input id="vrpn_server" type="text" /></div>
+      <div class="field"><label>端口</label><input id="vrpn_port" type="number" /></div>
+      <div class="field"><label>刚体名</label><input id="tracker" type="text" /></div>
+      <div class="field"><label>往复 X</label><input id="shuttle_x" type="number" step="0.1" /></div>
+      <div class="field"><label>Y 最小</label><input id="shuttle_y_min" type="number" step="0.1" /></div>
+      <div class="field"><label>Y 最大</label><input id="shuttle_y_max" type="number" step="0.1" /></div>
+      <div class="field"><label>速度</label><input id="shuttle_speed" type="number" step="0.1" /></div>
+      <div class="actions"><button id="save-params" onclick="saveConfig()">保存参数</button></div>
+    </div>
+  </section>
+
+  <section id="status">
+    <h2>状态检查　算法：<span id="mode"></span>　NMPC：<span id="nmpc-state"></span></h2>
+    <table>
+      <thead>
+        <tr><th>来源</th><th>是否新鲜</th><th>X / v</th><th>Y / w</th><th>航向 / 内容</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>动捕 VRPN</td>
+          <td id="mocap-ok"></td>
+          <td id="mocap-x" class="num"></td>
+          <td id="mocap-y" class="num"></td>
+          <td id="mocap-yaw" class="num"></td>
+        </tr>
+        <tr>
+          <td>状态估计</td>
+          <td id="est-ok"></td>
+          <td id="est-x" class="num"></td>
+          <td id="est-y" class="num"></td>
+          <td id="est-yaw" class="num"></td>
+        </tr>
+        <tr>
+          <td>估计 − 动捕</td>
+          <td id="delta-ok"></td>
+          <td id="delta-x" class="num"></td>
+          <td id="delta-y" class="num"></td>
+          <td id="delta-yaw" class="num"></td>
+        </tr>
+        <tr>
+          <td>cmd_vel</td>
+          <td id="cmd-ok"></td>
+          <td id="cmd-v" class="num"></td>
+          <td id="cmd-w" class="num"></td>
+          <td id="cmd-raw" class="num"></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="control">
+    <div class="control-body">
+      <div class="control-main">
+        <h2>控制</h2>
+        <div class="row">
+          <button class="go" id="stack-start" onclick="startStack()">启动</button>
+          <button class="danger" id="stack-stop" onclick="stopStack()">停止</button>
+        </div>
+      </div>
+      <div id="teleop">
+        <h2>临时遥控</h2>
+        <div class="pad">
+          <span></span>
+          <button type="button" id="btn-forward">前进</button>
+          <span></span>
+          <button type="button" id="btn-left">左转</button>
+          <button type="button" id="btn-stop" onclick="toggleTeleop('stop')">停</button>
+          <button type="button" id="btn-right">右转</button>
+          <span></span>
+          <button type="button" id="btn-back">后退</button>
+        </div>
+        <p class="note" id="teleop-note">按住移动，松开即停。</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+const NMPC_NAME = {1: "自检", 2: "就绪", 3: "跟踪", 4: "保持"};
+const TELEOP_BTNS = ["forward", "back", "left", "right"];
+let lastStatus = {};
+
+function say(text, ok) {
+  const el = document.getElementById("msg");
+  el.textContent = text || "";
+  el.className = text ? (ok ? "ok" : "bad") : "";
+}
+
+function fill(id, value) {
+  const el = document.getElementById(id);
+  if (el && document.activeElement !== el) el.value = value;
+}
+
+function padLeft(text, width) {
+  text = String(text);
+  while (text.length < width) text = " " + text;
+  return text;
+}
+
+function fmt(value, digits) {
+  digits = digits == null ? 3 : digits;
+  const bodyWidth = 3 + 1 + digits;
+  if (value === undefined || value === null || Number.isNaN(Number(value))) {
+    return " " + padLeft("\u2014", bodyWidth);
+  }
+  const n = Number(value);
+  const sign = n < 0 ? "-" : " ";
+  return sign + padLeft(Math.abs(n).toFixed(digits), bodyWidth);
+}
+
+function setFresh(id, ok) {
+  const el = document.getElementById(id);
+  el.textContent = ok ? "新鲜" : "超时";
+  el.className = ok ? "ok" : "bad";
+}
+
+async function post(url, body) {
+  let data;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body || {})
+    });
+    data = await res.json();
+  } catch (err) {
+    say("请求失败：" + err, false);
+    return {ok: false, message: String(err)};
+  }
+  say(data.message || JSON.stringify(data), data.ok !== false);
+  return data;
+}
+
+async function startStack() {
+  const btn = document.getElementById("stack-start");
+  btn.disabled = true;
+  say("正在启动算法…", true);
+  try {
+    await post("/api/stack/start", {});
+    await refresh();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function stopStack() {
+  const btn = document.getElementById("stack-stop");
+  btn.disabled = true;
+  say("正在停车并停止算法…", true);
+  try {
+    await post("/api/stack/stop", {});
+    await refresh();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function saveConfig() {
+  if (lastStatus.stack_running || lastStatus.busy) {
+    say("算法运行或启停中，不能改参数", false);
+    return;
+  }
+  const body = {
+    vrpn_server: document.getElementById("vrpn_server").value,
+    vrpn_port: Number(document.getElementById("vrpn_port").value),
+    tracker: document.getElementById("tracker").value,
+    shuttle_x: Number(document.getElementById("shuttle_x").value),
+    shuttle_y_min: Number(document.getElementById("shuttle_y_min").value),
+    shuttle_y_max: Number(document.getElementById("shuttle_y_max").value),
+    shuttle_speed: Number(document.getElementById("shuttle_speed").value)
+  };
+  await post("/api/config", body);
+  await refresh();
+}
+
+function applyLocks(s) {
+  const stack = !!s.stack_running;
+  const teleop = !!s.teleop_active;
+  const busy = !!s.busy;
+  document.getElementById("stack-start").disabled = stack || teleop || busy;
+  document.getElementById("stack-stop").disabled = teleop || busy;
+  document.getElementById("teleop").classList.toggle("locked", stack || busy);
+  document.getElementById("params").classList.toggle("locked", stack || busy);
+  const saveBtn = document.getElementById("save-params");
+  if (saveBtn) saveBtn.disabled = stack || busy;
+  const inputs = document.querySelectorAll("#params input");
+  for (let i = 0; i < inputs.length; i++) inputs[i].disabled = stack || busy;
+  const mode = document.getElementById("mode");
+  if (busy) {
+    mode.textContent = "正在启停";
+    mode.className = "";
+    document.getElementById("teleop-note").textContent = "正在启停，遥控已锁定。";
+  } else if (stack) {
+    mode.textContent = "已启动";
+    mode.className = "ok";
+    document.getElementById("teleop-note").textContent = "算法在跑，遥控已锁定。";
+  } else if (teleop) {
+    mode.textContent = "遥控中";
+    mode.className = "ok";
+    document.getElementById("teleop-note").textContent = "按住移动，松开即停。";
+  } else {
+    mode.textContent = "未启动";
+    mode.className = "bad";
+    document.getElementById("teleop-note").textContent = "按住移动，松开即停。";
+  }
+}
+
+function renderTeleop(s) {
+  const t = s.teleop || {};
+  TELEOP_BTNS.forEach((name) => {
+    const el = document.getElementById("btn-" + name);
+    if (!el) return;
+    const on = !!t[name];
+    el.className = on ? "pressed" : "";
+    el.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  const stopEl = document.getElementById("btn-stop");
+  if (stopEl) {
+    const idle = !t.forward && !t.back && !t.left && !t.right;
+    stopEl.className = idle ? "pressed" : "";
+    stopEl.setAttribute("aria-pressed", idle ? "true" : "false");
+  }
+}
+
+function renderStatus(s) {
+  const topics = s.topics || {};
+  const mocap = topics.mocap || {};
+  const est = topics.estimator || {};
+  const nmpc = topics.nmpc || {};
+  const cmd = topics.cmd_vel || {};
+  const cmp = s.compare || {};
+  const delta = cmp.delta || null;
+  const md = mocap.data || {};
+  const ed = est.data || {};
+  setFresh("mocap-ok", !!mocap.ok);
+  setFresh("est-ok", !!(est.ok && ed.x !== undefined));
+  document.getElementById("mocap-x").textContent = fmt(md.x, 3);
+  document.getElementById("mocap-y").textContent = fmt(md.y, 3);
+  document.getElementById("mocap-yaw").textContent = fmt(md.yaw, 3);
+  document.getElementById("est-x").textContent = fmt(ed.x, 3);
+  document.getElementById("est-y").textContent = fmt(ed.y, 3);
+  document.getElementById("est-yaw").textContent = fmt(ed.yaw, 3);
+  if (delta) {
+    setFresh("delta-ok", !!(mocap.ok && est.ok));
+    document.getElementById("delta-x").textContent = fmt(delta.dx, 3);
+    document.getElementById("delta-y").textContent = fmt(delta.dy, 3);
+    document.getElementById("delta-yaw").textContent = fmt(delta.dyaw, 3);
+  } else {
+    setFresh("delta-ok", false);
+    document.getElementById("delta-x").textContent = "—";
+    document.getElementById("delta-y").textContent = "—";
+    document.getElementById("delta-yaw").textContent = "—";
+  }
+  const n = nmpc.data && nmpc.data.control_state;
+  const nmpcEl = document.getElementById("nmpc-state");
+  if (nmpc.ok && n !== undefined) {
+    nmpcEl.textContent = (NMPC_NAME[n] || String(n));
+    nmpcEl.className = n === 3 ? "ok" : "";
+  } else {
+    nmpcEl.textContent = "无";
+    nmpcEl.className = "bad";
+  }
+  setFresh("cmd-ok", !!cmd.ok);
+  if (cmd.data) {
+    document.getElementById("cmd-v").textContent = fmt(cmd.data.v, 3);
+    document.getElementById("cmd-w").textContent = fmt(cmd.data.w, 3);
+    document.getElementById("cmd-raw").textContent = fmt(cmd.data.v, 3) + "  " + fmt(cmd.data.w, 3);
+  } else {
+    document.getElementById("cmd-v").textContent = "—";
+    document.getElementById("cmd-w").textContent = "—";
+    document.getElementById("cmd-raw").textContent = "—";
+  }
+}
+
+async function refresh() {
+  const res = await fetch("/api/status");
+  const s = await res.json();
+  lastStatus = s;
+  fill("vrpn_server", s.vrpn_server);
+  fill("vrpn_port", s.vrpn_port);
+  fill("tracker", s.tracker);
+  fill("shuttle_x", s.shuttle_x);
+  fill("shuttle_y_min", s.shuttle_y_min);
+  fill("shuttle_y_max", s.shuttle_y_max);
+  fill("shuttle_speed", s.shuttle_speed);
+  applyLocks(s);
+  renderTeleop(s);
+  renderStatus(s);
+  if (s.last_error) say(s.last_error, false);
+}
+
+async function toggleTeleop(button) {
+  if (lastStatus.stack_running || lastStatus.busy) {
+    say("算法在跑或正在停止，不能遥控", false);
+    return;
+  }
+  const body = button === "stop" ? {button: "stop"} : {button: button, pressed: false};
+  await post("/api/teleop", body);
+  await refresh();
+}
+
+function bindTeleopHold(name) {
+  const el = document.getElementById("btn-" + name);
+  if (!el) return;
+  let held = false;
+  const down = function (ev) {
+    ev.preventDefault();
+    if (held) return;
+    if (lastStatus.stack_running || lastStatus.busy) {
+      say("算法在跑或正在停止，不能遥控", false);
+      return;
+    }
+    held = true;
+    try { el.setPointerCapture(ev.pointerId); } catch (err) {}
+    post("/api/teleop", {button: name, pressed: true}).then(refresh);
+  };
+  const up = function (ev) {
+    if (!held) return;
+    held = false;
+    if (ev && ev.preventDefault) ev.preventDefault();
+    post("/api/teleop", {button: name, pressed: false}).then(refresh);
+  };
+  el.addEventListener("pointerdown", down);
+  el.addEventListener("pointerup", up);
+  el.addEventListener("pointercancel", up);
+  el.addEventListener("lostpointercapture", up);
+  el.addEventListener("contextmenu", function (ev) { ev.preventDefault(); });
+}
+
+TELEOP_BTNS.forEach(bindTeleopHold);
+window.addEventListener("blur", function () { toggleTeleop("stop"); });
+
+refresh();
+setInterval(refresh, 700);
+</script>
+</body>
+</html>

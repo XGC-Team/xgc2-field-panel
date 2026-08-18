@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  package-compliance:
+    name: package-compliance
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Check scripts and packaging metadata
+        run: |
+          set -euo pipefail
+          git diff --check HEAD
+          bash -n .xgc2/scripts/*.sh
+          python3 .xgc2/scripts/check-workflow-bootstrap.py
+          python3 xgc2_field_panel/test/test_layout.py
+  build:
+    name: all-arch
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Build the single Architecture: all deb"
+        run: |
+          set -euo pipefail
+          .xgc2/scripts/ci_in_image.sh \
+            --image ghcr.io/xgc-team/xgc2-images/xgc2-build-focal-ros-noetic:1.0.0 \
+            --output-dir "$GITHUB_WORKSPACE/debs"
+      - name: Create trusted manifests for every suite
+        run: |
+          set -euo pipefail
+          product_version="$(awk '/^version:/ {print $2; exit}' .xgc2/product.yml)"
+          for pair in bionic/amd64 bionic/arm64 focal/amd64 focal/arm64 \
+                      jammy/amd64 jammy/arm64 noble/amd64 noble/arm64; do
+            distro="${pair%/*}"
+            arch="${pair#*/}"
+            python3 .xgc2/scripts/xgc2_artifact_manifest.py build \
+              --deb-dir debs \
+              --output-dir .ci/build-manifests \
+              --product xgc2-field-panel \
+              --product-version "$product_version" \
+              --distribution "${distro}" \
+              --architecture "${arch}" \
+              --source-sha "$GITHUB_SHA" \
+              --ci-run-id "$GITHUB_RUN_ID" \
+              --ci-workflow "$GITHUB_WORKFLOW" \
+              --ci-workflow-ref "$GITHUB_WORKFLOW_REF"
+          done
+      - name: Upload deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xgc2-field-panel-all
+          path: |
+            debs/*.deb
+            .ci/build-manifests/*.json
+          retention-days: 14
+          include-hidden-files: true

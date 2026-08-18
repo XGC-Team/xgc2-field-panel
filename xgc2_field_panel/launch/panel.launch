@@ -1,0 +1,11 @@
+<launch>
+  <arg name="port" default="8099" />
+  <arg name="bind" default="0.0.0.0" />
+  <arg name="ns" default="ugv1" />
+
+  <env name="FIELD_PANEL_PORT" value="$(arg port)" />
+  <env name="FIELD_PANEL_BIND" value="$(arg bind)" />
+  <env name="FIELD_PANEL_NS" value="$(arg ns)" />
+
+  <node pkg="xgc2_field_panel" type="field_panel_node" name="xgc2_field_panel" output="screen" />
+</launch>

@@ -1,0 +1,67 @@
+schema: xgc2.product.v1
+id: xgc2-field-panel
+name: XGC2 Field Panel
+version: 0.1.0-1
+kind: ros1-apt
+summary: Onboard field Web panel. Starts or stops roslaunch on the robot and
+  talks official ROS messages only. Does not Depend on vehicle or algorithm
+  packages.
+groups:
+- ros1
+- tools
+- field
+ros:
+  distro: melodic,noetic
+  workspace: catkin
+  packages:
+  - xgc2_field_panel
+apt:
+  distribution: bionic,focal,jammy,noble
+  install:
+  - xgc2-field-panel
+  packages:
+  - xgc2-field-panel
+  package_architectures:
+    xgc2-field-panel:
+    - amd64
+    - arm64
+  depends:
+  - python3
+  recommends:
+  - ros-melodic-rospy
+  - ros-noetic-rospy
+  - ros-melodic-roslaunch
+  - ros-noetic-roslaunch
+  - ros-melodic-geometry-msgs
+  - ros-noetic-geometry-msgs
+  - ros-melodic-std-msgs
+  - ros-noetic-std-msgs
+  - ros-melodic-sensor-msgs
+  - ros-noetic-sensor-msgs
+usage:
+  install: |
+    sudo apt update
+    sudo apt install xgc2-field-panel
+  smoke_test: |
+    test -x /opt/ros/noetic/lib/xgc2_field_panel/field_panel_node
+    test -f /opt/ros/noetic/share/xgc2_field_panel/launch/panel.launch
+    test -f /opt/ros/noetic/share/xgc2_field_panel/web/index.html
+  notes: |
+    Missing chassis/estimator/NMPC packages fail at the Start button,
+    not at apt install.
+ownership:
+  paths:
+  - /opt/ros/melodic/share/xgc2_field_panel
+  - /opt/ros/melodic/lib/xgc2_field_panel
+  - /opt/ros/noetic/share/xgc2_field_panel
+  - /opt/ros/noetic/lib/xgc2_field_panel
+release:
+  repository: XGC-Team/xgc2-field-panel
+  ref: main
+  workflow: release.yml
+  ci_workflow: ci.yml
+  apt_versions:
+    bionic: 0.1.0-1
+    focal: 0.1.0-1
+    jammy: 0.1.0-1
+    noble: 0.1.0-1

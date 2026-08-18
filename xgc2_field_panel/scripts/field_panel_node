@@ -1,0 +1,995 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# Onboard field panel. Parallel to XGC2 Core/Agent.
+# Python 2/3. stdlib HTTP + optional rospy.
+from __future__ import print_function
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+try:
+    from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
+except ImportError:
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+try:
+    import rospy
+    from geometry_msgs.msg import PoseStamped, Twist
+    from sensor_msgs.msg import Imu
+    from std_msgs.msg import String, UInt32
+    from rospy.msg import AnyMsg
+except ImportError:
+    rospy = None
+    AnyMsg = None
+    String = None
+
+BIND = os.environ.get("FIELD_PANEL_BIND", "0.0.0.0")
+PORT = int(os.environ.get("FIELD_PANEL_PORT", "8099"))
+ROS_DISTRO = os.environ.get("ROS_DISTRO", "melodic")
+NS = os.environ.get("FIELD_PANEL_NS", "ugv1")
+ONBOARD_ENV = os.environ.get(
+    "FIELD_PANEL_ONBOARD_ENV", "/etc/xgc2/agilex/onboard.env"
+)
+PANEL_CONFIG = os.environ.get(
+    "FIELD_PANEL_CONFIG", "/etc/xgc2/agilex/field_panel.json"
+)
+WEB_NAME = "index.html"
+HERE = os.path.dirname(os.path.abspath(__file__))
+PERSIST_FIELDS = (
+    ("vrpn_server", str),
+    ("vrpn_port", int),
+    ("tracker", str),
+    ("shuttle_x", float),
+    ("shuttle_y_min", float),
+    ("shuttle_y_max", float),
+    ("shuttle_speed", float),
+)
+
+
+def _read_env_file(path):
+    values = {}
+    if not os.path.isfile(path):
+        return values
+    handle = open(path, "r")
+    try:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip("'\"")
+    finally:
+        handle.close()
+    return values
+
+
+def _atomic_write(path, text):
+    directory = os.path.dirname(path) or "."
+    if directory and not os.path.isdir(directory):
+        try:
+            os.makedirs(directory)
+        except OSError:
+            pass
+    tmp = path + ".tmp"
+    handle = open(tmp, "w")
+    try:
+        handle.write(text)
+    finally:
+        handle.close()
+    if os.path.exists(path):
+        os.remove(path)
+    os.rename(tmp, path)
+
+
+def persistable_config():
+    _sync_speed_limits()
+    data = {}
+    for name, _kind in PERSIST_FIELDS:
+        data[name] = getattr(STATE, name)
+    return data
+
+
+def apply_saved_config(data):
+    if not isinstance(data, dict):
+        return
+    for name, kind in PERSIST_FIELDS:
+        if name not in data:
+            continue
+        try:
+            value = kind(data[name])
+        except (TypeError, ValueError):
+            continue
+        if kind is str:
+            value = value.strip()
+            if name == "tracker" and not value:
+                continue
+        setattr(STATE, name, value)
+    _sync_speed_limits()
+
+
+def _sync_speed_limits():
+    speed = STATE.shuttle_speed
+    if not isinstance(speed, float):
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            speed = 0.5
+    if speed <= 0.05 or speed != speed:
+        speed = 0.5
+    STATE.shuttle_speed = speed
+    STATE.nmpc_max_v = speed
+    STATE.nmpc_min_v = -speed
+    STATE.nmpc_max_w = speed if speed >= 0.8 else 0.8
+
+
+def load_panel_config(path=None):
+    config_path = path or PANEL_CONFIG
+    if not config_path or not os.path.isfile(config_path):
+        return False
+    handle = open(config_path, "r")
+    try:
+        raw = handle.read()
+    finally:
+        handle.close()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return False
+    apply_saved_config(data)
+    return True
+
+
+def save_panel_config(path=None):
+    config_path = path or PANEL_CONFIG
+    if not config_path:
+        return False
+    try:
+        _atomic_write(config_path, json.dumps(persistable_config(), indent=2, sort_keys=True))
+    except (IOError, OSError):
+        return False
+    return True
+
+
+def _web_root():
+    candidates = [
+        os.environ.get("FIELD_PANEL_WEB", ""),
+        os.path.join(HERE, "..", "web"),
+        os.path.normpath(os.path.join(HERE, "..", "share", "xgc2_field_panel", "web")),
+        # Debian/APT layout: node in lib/, pages in share/.
+        os.path.join("/opt/ros", ROS_DISTRO, "share", "xgc2_field_panel", "web"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(os.path.join(candidate, WEB_NAME)):
+            return os.path.abspath(candidate)
+    return os.path.abspath(os.path.join(HERE, "..", "web"))
+
+
+class FieldState(object):
+    def __init__(self):
+        env = _read_env_file(ONBOARD_ENV)
+        self.lock = threading.Lock()
+        self.vrpn_server = env.get("VRPN_SERVER", "192.168.100.5")
+        self.vrpn_port = int(env.get("VRPN_PORT", "3883"))
+        self.tracker = env.get("MOCAP_RIGID_BODY", "pose_0")
+        self.shuttle_x = 0.0
+        self.shuttle_y_min = -2.0
+        self.shuttle_y_max = 2.0
+        self.shuttle_speed = 0.5
+        self.nmpc_max_v = 1.2
+        self.nmpc_min_v = -1.2
+        self.nmpc_max_w = 1.0
+        self.teleop_v = 0.0
+        self.teleop_w = 0.0
+        self.teleop_fwd = False
+        self.teleop_back = False
+        self.teleop_left = False
+        self.teleop_right = False
+        self.estop = False
+        self.procs = {}
+        self.topics = {}
+        self.cmd_pub = None
+        self.halt_pub = None
+        self.hold_pub = None
+        self.vrpn_sub = None
+        self.ros_ready = False
+        self.last_error = ""
+        self.busy = False
+
+    def snapshot(self):
+        now = time.time()
+        with self.lock:
+            topics = {}
+            for name, item in self.topics.items():
+                age = None
+                if item.get("stamp"):
+                    age = now - item["stamp"]
+                topics[name] = {
+                    "age_s": age,
+                    "ok": age is not None and age < item.get("stale_s", 0.5),
+                    "data": item.get("data"),
+                }
+            procs = {}
+            running_names = []
+            for name, proc in self.procs.items():
+                running = proc.poll() is None
+                procs[name] = {"running": running, "pid": proc.pid if running else None}
+                if running:
+                    running_names.append(name)
+            teleop_active = (not self.estop) and (
+                self.teleop_fwd or self.teleop_back or self.teleop_left or self.teleop_right
+            )
+            stack_running = any(
+                name in running_names
+                for name in ("vrpn_state", "estimator", "reference", "nmpc", "shuttle")
+            )
+            if self.busy:
+                mode = "busy"
+            elif stack_running:
+                mode = "algorithm"
+            elif teleop_active:
+                mode = "teleop"
+            else:
+                mode = "idle"
+            mocap = (topics.get("mocap") or {}).get("data") or {}
+            estimator = (topics.get("estimator") or {}).get("data") or {}
+            delta = None
+            if (
+                "x" in mocap
+                and "x" in estimator
+                and mocap.get("x") is not None
+                and estimator.get("x") is not None
+            ):
+                dx = float(estimator["x"]) - float(mocap["x"])
+                dy = float(estimator["y"]) - float(mocap["y"])
+                eyaw = float(estimator.get("yaw") or 0.0)
+                myaw = float(mocap.get("yaw") or 0.0)
+                dyaw = __import__("math").atan2(
+                    __import__("math").sin(eyaw - myaw),
+                    __import__("math").cos(eyaw - myaw),
+                )
+                delta = {
+                    "dx": dx,
+                    "dy": dy,
+                    "dyaw": dyaw,
+                    "dist": __import__("math").hypot(dx, dy),
+                }
+            return {
+                "vrpn_server": self.vrpn_server,
+                "vrpn_port": self.vrpn_port,
+                "tracker": self.tracker,
+                "shuttle_x": self.shuttle_x,
+                "shuttle_y_min": self.shuttle_y_min,
+                "shuttle_y_max": self.shuttle_y_max,
+                "shuttle_speed": self.shuttle_speed,
+                "nmpc_min_v": self.nmpc_min_v,
+                "nmpc_max_v": self.nmpc_max_v,
+                "nmpc_max_w": self.nmpc_max_w,
+                "teleop_active": teleop_active,
+                "teleop": {
+                    "forward": bool(self.teleop_fwd),
+                    "back": bool(self.teleop_back),
+                    "left": bool(self.teleop_left),
+                    "right": bool(self.teleop_right),
+                    "v": float(self.teleop_v),
+                    "w": float(self.teleop_w),
+                },
+                "busy": bool(self.busy),
+                "stack_running": stack_running,
+                "mode": mode,
+                "estop": self.estop,
+                "last_error": self.last_error,
+                "processes": procs,
+                "topics": topics,
+                "compare": {"mocap": mocap, "estimator": estimator, "delta": delta},
+            }
+
+
+STATE = FieldState()
+load_panel_config()
+_sync_speed_limits()
+
+
+def _source_prefix():
+    prefix = "/opt/ros/%s/setup.bash" % ROS_DISTRO
+    parts = []
+    if os.path.isfile(prefix):
+        parts.append("source %s" % prefix)
+    # Overlay last so shuttle/NMPC children do not pick vendor ~/catkin_ws
+    # or the released APT binary that has no shuttle_mode.
+    for overlay in (
+        os.environ.get("FIELD_PANEL_OVERLAY", ""),
+        "/opt/xgc2/shuttle_ws/devel/setup.bash",
+    ):
+        if overlay and os.path.isfile(overlay) and overlay not in "".join(parts):
+            parts.append("source %s" % overlay)
+    return " && ".join(parts) if parts else "true"
+
+
+def _launch_inner(command):
+    env = _read_env_file(ONBOARD_ENV)
+    exports = [
+        "export ROS_MASTER_URI=%s" % env.get("ROS_MASTER_URI", os.environ.get("ROS_MASTER_URI", "http://127.0.0.1:11311")),
+        "export ROS_IP=%s" % env.get("ROS_IP", os.environ.get("ROS_IP", "127.0.0.1")),
+        "export ROS_DISTRO=%s" % ROS_DISTRO,
+    ]
+    return "%s && %s && %s" % (" && ".join(exports), _source_prefix(), command)
+
+
+def _run_bash(command):
+    proc = subprocess.Popen(
+        ["bash", "-lc", _launch_inner(command)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    out, _unused = proc.communicate()
+    if out is None:
+        text = ""
+    elif not isinstance(out, str):
+        text = out.decode("utf-8", "replace")
+    else:
+        text = out
+    return proc.returncode, text.strip()
+
+
+def _require_rospack(pkg):
+    code, text = _run_bash("rospack find %s" % pkg)
+    if code != 0:
+        return False, "missing ROS package %s: %s" % (pkg, text or "rospack find failed")
+    return True, text
+
+
+def _package_present(pkg):
+    ok, _detail = _require_rospack(pkg)
+    return ok
+
+
+def _cmd_vel_topic():
+    if CMD_VEL_TOPIC.startswith("/"):
+        return CMD_VEL_TOPIC
+    return "/%s/%s" % (NS, CMD_VEL_TOPIC)
+
+
+PROCESS_PACKAGES = {
+    "estimator": "estimator_vrpn_ugv_state",
+    "nmpc": "unicycle_ugv_controller",
+    "reference": "unicycle_reference_trajectory",
+    "shuttle": "unicycle_reference_trajectory",
+    "mocap": "vrpn_client_ros",
+}
+
+# Panel owns algorithms only. Chassis / IMU / roscore stay on boot autostart.
+CMD_VEL_TOPIC = os.environ.get("FIELD_PANEL_CMD_VEL", "cmd_vel")
+STATE_SOURCE = os.environ.get("FIELD_PANEL_STATE_SOURCE", "auto")
+HOLD_TOPIC = os.environ.get("FIELD_PANEL_HOLD_TOPIC", "/command")
+TELEOP_V = 0.4
+TELEOP_W = 0.6
+TELEOP_BUTTONS = {
+    "forward": "teleop_fwd",
+    "back": "teleop_back",
+    "left": "teleop_left",
+    "right": "teleop_right",
+}
+
+
+def _use_estimator():
+    mode = (STATE_SOURCE or "auto").strip().lower()
+    if mode in ("vrpn", "vrpn_state", "mocap"):
+        return False
+    if mode == "estimator":
+        return _package_present("estimator_vrpn_ugv_state")
+    return False
+
+
+def _should_launch_mocap():
+    mode = os.environ.get("FIELD_PANEL_MOCAP", "auto").strip().lower()
+    if mode in ("0", "off", "no", "false"):
+        return False
+    if mode in ("1", "on", "yes", "true"):
+        return True
+    return _package_present("vrpn_client_ros") or _package_present("xgc2_vrpn_relay")
+
+
+def ensure_mocap():
+    if not _should_launch_mocap():
+        return True, "mocap listen-only"
+    return start_process("mocap")
+
+
+def restart_mocap():
+    stop_process("mocap")
+    bind_vrpn_sub()
+    return ensure_mocap()
+
+
+def start_process(name):
+    with STATE.lock:
+        existing = STATE.procs.get(name)
+        if existing is not None and existing.poll() is None:
+            return True, "%s already running" % name
+        cmds = {
+            "mocap": (
+                "roslaunch xgc2_vrpn_relay vrpn.launch server:=%s port:=%s tracker:=%s"
+                % (STATE.vrpn_server, STATE.vrpn_port, STATE.tracker)
+                if _package_present("xgc2_vrpn_relay")
+                else "rosrun vrpn_client_ros vrpn_client_node "
+                "_server:=%s _port:=%s _update_frequency:=100.0 _refresh_tracker_frequency:=0.0 "
+                "_use_server_time:=false _broadcast_tf:=false"
+                % (STATE.vrpn_server, STATE.vrpn_port)
+            ),
+            "estimator": (
+                "roslaunch estimator_vrpn_ugv_state vrpn_ugv_state_estimator.launch "
+                "ns:=%s imu_topic:=/imu/data pose_topic:=/vrpn_client_node/%s/pose"
+                % (NS, STATE.tracker)
+            ),
+            "vrpn_state": (
+                "rosrun xgc2_field_panel vrpn_to_planar_state "
+                "_tracker:=%s _ns:=%s "
+                "_pose_topic:=/vrpn_client_node/%s/pose "
+                "_twist_topic:=/vrpn_client_node/%s/twist "
+                "_state_topic:=/%s/alg/state_estimator/state"
+                % (STATE.tracker, NS, STATE.tracker, STATE.tracker, NS)
+            ),
+            "nmpc": (
+                "roslaunch unicycle_ugv_controller ugv_unicycle_nmpc_controller.launch "
+                "ns:=%s vrpn_rigid_body:=%s auto_start_tracking:=true "
+                "state_source:=%s cmd_vel_topic:=%s "
+                "min_linear_speed:=%s max_linear_speed:=%s max_angular_speed:=%s"
+                % (
+                    NS,
+                    STATE.tracker,
+                    "state_estimator",
+                    CMD_VEL_TOPIC,
+                    STATE.nmpc_min_v,
+                    STATE.nmpc_max_v,
+                    STATE.nmpc_max_w,
+                )
+            ),
+            "reference": (
+                "roslaunch unicycle_reference_trajectory ugv_unicycle_reference_trajectory.launch "
+                "ns:=%s default_analytic_enabled:=false" % NS
+            ),
+            "shuttle": (
+                "roslaunch unicycle_reference_trajectory ugv_unicycle_target_replanner.launch "
+                "ns:=%s random_targets:=false shuttle_mode:=true replan_period:=1.0 "
+                "shuttle_x:=%s shuttle_y_min:=%s shuttle_y_max:=%s shuttle_speed:=%s "
+                "shuttle_arrive_tol:=0.35 shuttle_yaw_tol:=0.7"
+                % (
+                    NS,
+                    STATE.shuttle_x,
+                    STATE.shuttle_y_min,
+                    STATE.shuttle_y_max,
+                    STATE.shuttle_speed,
+                )
+            ),
+        }
+        if name not in cmds:
+            return False, "unknown process %s" % name
+        required = PROCESS_PACKAGES.get(name)
+        if required:
+            ok, detail = _require_rospack(required)
+            if not ok:
+                STATE.last_error = detail
+                return False, detail
+        log_path = "/tmp/xgc2-field-panel-%s.log" % name
+        log = open(log_path, "w")
+        proc = subprocess.Popen(
+            ["bash", "-lc", _launch_inner("exec %s" % cmds[name])],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid,
+        )
+        STATE.procs[name] = proc
+    time.sleep(0.7)
+    if proc.poll() is not None:
+        try:
+            handle = open(log_path, "r")
+            tail = handle.read()[-1500:]
+            handle.close()
+        except IOError:
+            tail = ""
+        message = tail.strip() or ("%s exited %s" % (name, proc.returncode))
+        with STATE.lock:
+            STATE.procs.pop(name, None)
+            STATE.last_error = message
+        return False, message
+    return True, "started %s pid=%s" % (name, proc.pid)
+
+
+def stop_process(name):
+    with STATE.lock:
+        proc = STATE.procs.get(name)
+        if proc is None:
+            return True, "%s not running" % name
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+            except OSError:
+                proc.terminate()
+            deadline = time.time() + 3.0
+            while time.time() < deadline and proc.poll() is None:
+                time.sleep(0.1)
+            if proc.poll() is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except OSError:
+                    proc.kill()
+        STATE.procs.pop(name, None)
+        return True, "stopped %s" % name
+
+
+_STACK_CACHE = None
+
+
+def _algorithm_stack():
+    global _STACK_CACHE
+    if _STACK_CACHE is not None:
+        return list(_STACK_CACHE)
+    names = []
+    if _use_estimator():
+        names.append("estimator")
+    else:
+        names.append("vrpn_state")
+    names.extend(["reference", "nmpc", "shuttle"])
+    _STACK_CACHE = list(names)
+    return names
+
+
+def _stack_running():
+    for name in _algorithm_stack():
+        proc = STATE.procs.get(name)
+        if proc is not None and proc.poll() is None:
+            return True
+    return False
+
+
+def _teleop_active():
+    return (not STATE.estop) and (
+        STATE.teleop_fwd or STATE.teleop_back or STATE.teleop_left or STATE.teleop_right
+    )
+
+
+def _teleop_speed():
+    speed = STATE.shuttle_speed
+    try:
+        speed = float(speed)
+    except (TypeError, ValueError):
+        speed = TELEOP_V
+    if speed <= 0.05:
+        speed = TELEOP_V
+    return speed
+
+
+def _teleop_cmd():
+    speed = _teleop_speed()
+    yaw_speed = speed if speed >= 0.4 else 0.4
+    v = 0.0
+    w = 0.0
+    if STATE.teleop_fwd:
+        v = speed
+    elif STATE.teleop_back:
+        v = -speed
+    if STATE.teleop_left:
+        w = yaw_speed
+    elif STATE.teleop_right:
+        w = -yaw_speed
+    return v, w
+
+
+def _sync_teleop_cmd():
+    STATE.teleop_v, STATE.teleop_w = _teleop_cmd()
+
+
+def _clear_teleop():
+    STATE.teleop_fwd = False
+    STATE.teleop_back = False
+    STATE.teleop_left = False
+    STATE.teleop_right = False
+    STATE.teleop_v = 0.0
+    STATE.teleop_w = 0.0
+
+
+def _publish_zero_cmd():
+    if rospy is None:
+        return
+    twist = Twist()
+    if STATE.halt_pub is not None:
+        STATE.halt_pub.publish(twist)
+    if STATE.cmd_pub is not None:
+        STATE.cmd_pub.publish(twist)
+
+
+def _request_nmpc_hold():
+    if rospy is None or String is None or STATE.hold_pub is None:
+        return
+    msg = String()
+    msg.data = "hold"
+    STATE.hold_pub.publish(msg)
+
+
+def _request_nmpc_track():
+    if rospy is None or String is None or STATE.hold_pub is None:
+        return
+    msg = String()
+    msg.data = "track"
+    STATE.hold_pub.publish(msg)
+
+
+def _motion_stopped(v_eps=0.05, w_eps=0.05):
+    item = STATE.topics.get("cmd_vel") or {}
+    data = item.get("data") or {}
+    try:
+        v = float(data.get("v") or 0.0)
+        w = float(data.get("w") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return abs(v) <= v_eps and abs(w) <= w_eps
+
+
+def halt_until_stopped(timeout=2.5):
+    """Hold + zero cmd_vel until observed speed is ~0, or timeout."""
+    with STATE.lock:
+        _clear_teleop()
+    _request_nmpc_hold()
+    deadline = time.time() + max(0.4, float(timeout))
+    still = 0
+    while time.time() < deadline:
+        _publish_zero_cmd()
+        if _motion_stopped():
+            still += 1
+            if still >= 6:
+                _publish_zero_cmd()
+                return True
+        else:
+            still = 0
+        time.sleep(0.05)
+    _publish_zero_cmd()
+    return _motion_stopped()
+
+
+def apply_teleop(payload):
+    if not isinstance(payload, dict):
+        payload = {}
+    with STATE.lock:
+        if STATE.estop:
+            return False, "estop"
+        if STATE.busy:
+            return False, "正在启停算法，不能遥控"
+        if _stack_running():
+            _clear_teleop()
+            return False, "算法在跑或正在停止，不能遥控"
+        button = str(payload.get("button") or "").strip().lower()
+        if button in ("stop", "clear") or payload.get("clear"):
+            _clear_teleop()
+            _publish_zero_cmd()
+            return True, "遥控已松开"
+        attr = TELEOP_BUTTONS.get(button)
+        if attr is None:
+            return False, "unknown teleop button"
+        if "pressed" in payload:
+            on = bool(payload.get("pressed"))
+        else:
+            on = not getattr(STATE, attr)
+        if on:
+            if button == "forward":
+                STATE.teleop_back = False
+            elif button == "back":
+                STATE.teleop_fwd = False
+            elif button == "left":
+                STATE.teleop_right = False
+            elif button == "right":
+                STATE.teleop_left = False
+        setattr(STATE, attr, on)
+        _sync_teleop_cmd()
+        if not _teleop_active():
+            _publish_zero_cmd()
+        return True, "遥控 %s" % button
+
+
+def start_stack():
+    with STATE.lock:
+        if STATE.busy:
+            return False, "正在处理上一次启停"
+        if _teleop_active():
+            return False, "遥控按下中，先松开遥控再启停算法"
+        if _stack_running():
+            _request_nmpc_track()
+            return True, "算法已在运行"
+        STATE.busy = True
+        _clear_teleop()
+    _request_nmpc_track()
+    started = []
+    try:
+        for name in _algorithm_stack():
+            ok, message = start_process(name)
+            if not ok:
+                halt_until_stopped(1.2)
+                for prev in reversed(started):
+                    stop_process(prev)
+                _publish_zero_cmd()
+                with STATE.lock:
+                    STATE.last_error = "启动失败：%s — %s" % (name, message)
+                return False, STATE.last_error
+            started.append(name)
+        with STATE.lock:
+            STATE.last_error = ""
+        if not started:
+            return False, "没有可启动的算法包"
+        _request_nmpc_track()
+        return True, "已启动算法"
+    finally:
+        with STATE.lock:
+            STATE.busy = False
+
+
+def stop_stack():
+    with STATE.lock:
+        if STATE.busy:
+            return False, "正在处理上一次启停"
+        if _teleop_active():
+            return False, "遥控按下中，先松开遥控再启停算法"
+        STATE.busy = True
+    try:
+        if not halt_until_stopped(2.5):
+            _request_nmpc_hold()
+            halt_until_stopped(1.5)
+        names = [
+            n
+            for n in ("nmpc", "shuttle", "reference", "estimator", "vrpn_state")
+            if n in _algorithm_stack() or n in STATE.procs
+        ]
+        for name in names:
+            stop_process(name)
+        stopped = halt_until_stopped(1.5)
+        if not stopped:
+            halt_until_stopped(1.5)
+            stopped = _motion_stopped()
+        with STATE.lock:
+            if stopped:
+                STATE.last_error = ""
+                return True, "已确认停车并停止算法"
+            STATE.last_error = "进程已关，但未确认车已停住，仍在发零速度"
+            return False, STATE.last_error
+    finally:
+        _publish_zero_cmd()
+        with STATE.lock:
+            STATE.busy = False
+
+
+def apply_shuttle_params():
+    if rospy is None or not STATE.ros_ready:
+        return
+    base = "/%s/unicycle_target_replanner" % NS
+    rospy.set_param(base + "/shuttle_mode", True)
+    rospy.set_param(base + "/shuttle_x", float(STATE.shuttle_x))
+    rospy.set_param(base + "/shuttle_y_min", float(STATE.shuttle_y_min))
+    rospy.set_param(base + "/shuttle_y_max", float(STATE.shuttle_y_max))
+    rospy.set_param(base + "/shuttle_speed", float(STATE.shuttle_speed))
+    rospy.set_param(base + "/random_targets", False)
+
+
+def apply_config(payload):
+    if not isinstance(payload, dict):
+        return False, "bad config"
+    with STATE.lock:
+        if STATE.busy or _stack_running():
+            return False, "算法运行或启停中，不能改参数"
+        prev = (STATE.vrpn_server, STATE.vrpn_port, STATE.tracker)
+        apply_saved_config(payload)
+        saved = save_panel_config()
+        changed = prev != (STATE.vrpn_server, STATE.vrpn_port, STATE.tracker)
+    apply_shuttle_params()
+    if changed:
+        restart_mocap()
+    if not saved:
+        return True, "参数已应用，但未能写入 %s" % PANEL_CONFIG
+    return True, "参数已保存"
+
+
+def _note(topic, data, stale_s=0.5):
+    with STATE.lock:
+        STATE.topics[topic] = {"stamp": time.time(), "data": data, "stale_s": stale_s}
+
+
+def _yaw_from_quat(q):
+    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return float(__import__("math").atan2(siny_cosp, cosy_cosp))
+
+
+def _on_alive(name, stale_s):
+    def _cb(_msg):
+        _note(name, {"alive": True}, stale_s)
+
+    return _cb
+
+
+def bind_vrpn_sub():
+    if rospy is None or not STATE.ros_ready:
+        return
+    topic = "/vrpn_client_node/%s/pose" % STATE.tracker
+    old = STATE.vrpn_sub
+    if old is not None:
+        try:
+            old.unregister()
+        except Exception:
+            pass
+    STATE.vrpn_sub = rospy.Subscriber(topic, PoseStamped, _on_vrpn)
+
+
+def _on_vrpn(msg):
+    _note(
+        "mocap",
+        {
+            "x": msg.pose.position.x,
+            "y": msg.pose.position.y,
+            "yaw": _yaw_from_quat(msg.pose.orientation),
+        },
+        0.2,
+    )
+
+
+def _on_estimator_state(msg):
+    _note(
+        "estimator",
+        {
+            "x": msg.position.x,
+            "y": msg.position.y,
+            "yaw": _yaw_from_quat(msg.orientation),
+            "alive": True,
+        },
+        0.3,
+    )
+
+
+def _on_nmpc_state(msg):
+    _note("nmpc", {"control_state": int(msg.data)}, 0.5)
+
+
+def _on_imu(msg):
+    _note("imu", {"ok": True}, 0.3)
+
+
+def _on_cmd(msg):
+    _note("cmd_vel", {"v": msg.linear.x, "w": msg.angular.z}, 0.3)
+
+
+def ros_setup():
+    if rospy is None:
+        return
+    rospy.init_node("xgc2_field_panel", anonymous=False, disable_signals=True)
+    STATE.ros_ready = True
+    STATE.cmd_pub = rospy.Publisher(_cmd_vel_topic(), Twist, queue_size=10)
+    STATE.halt_pub = rospy.Publisher(_cmd_vel_topic(), Twist, queue_size=1, latch=True)
+    if String is not None:
+        STATE.hold_pub = rospy.Publisher(HOLD_TOPIC, String, queue_size=1, latch=True)
+    bind_vrpn_sub()
+    rospy.Subscriber(
+        "/%s/alg/unicycle_ugv_controller/status/control_state" % NS, UInt32, _on_nmpc_state
+    )
+    rospy.Subscriber("/imu/data", Imu, _on_imu)
+    rospy.Subscriber(_cmd_vel_topic(), Twist, _on_cmd)
+    state_topic = "/%s/alg/state_estimator/state" % NS
+    estimator_bound = False
+    try:
+        from rigid_state_estimator_msgs.msg import PlanarStateEstimate
+
+        rospy.Subscriber(state_topic, PlanarStateEstimate, _on_estimator_state)
+        estimator_bound = True
+    except Exception:
+        estimator_bound = False
+    if AnyMsg is not None:
+        if not estimator_bound:
+            rospy.Subscriber(state_topic, AnyMsg, _on_alive("estimator", 0.3))
+        rospy.Subscriber(
+            "/%s/alg/unicycle_reference_trajectory/status" % NS,
+            AnyMsg,
+            _on_alive("reference", 0.5),
+        )
+
+
+def teleop_loop():
+    while True:
+        time.sleep(0.05)
+        if rospy is None or STATE.cmd_pub is None:
+            continue
+        with STATE.lock:
+            allowed = (
+                (not STATE.estop)
+                and (not STATE.busy)
+                and (not _stack_running())
+                and _teleop_active()
+            )
+            twist = Twist()
+            if allowed:
+                twist.linear.x = float(STATE.teleop_v)
+                twist.angular.z = float(STATE.teleop_w)
+        if allowed:
+            STATE.cmd_pub.publish(twist)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _send(self, code, body, content_type="application/json"):
+        data = body if isinstance(body, bytes) else body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path == "/" or self.path.startswith("/index"):
+            path = os.path.join(_web_root(), WEB_NAME)
+            handle = open(path, "rb")
+            try:
+                self._send(200, handle.read(), "text/html; charset=utf-8")
+            finally:
+                handle.close()
+            return
+        if self.path == "/api/status":
+            self._send(200, json.dumps(STATE.snapshot()))
+            return
+        self._send(404, json.dumps({"error": "not found"}))
+
+    def _read_json(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        if not raw:
+            return {}
+        if not isinstance(raw, str):
+            raw = raw.decode("utf-8")
+        return json.loads(raw)
+
+    def do_POST(self):
+        try:
+            payload = self._read_json()
+        except ValueError:
+            self._send(400, json.dumps({"ok": False, "error": "bad json"}))
+            return
+        path = self.path
+        ok = False
+        message = "unknown"
+        if path == "/api/stack/start":
+            ok, message = start_stack()
+        elif path == "/api/stack/stop":
+            ok, message = stop_stack()
+        elif path == "/api/config":
+            ok, message = apply_config(payload)
+        elif path == "/api/teleop":
+            ok, message = apply_teleop(payload)
+        elif path == "/api/estop":
+            ok, message = stop_stack()
+        else:
+            self._send(404, json.dumps({"ok": False, "error": "not found"}))
+            return
+        self._send(200 if ok else 400, json.dumps({"ok": ok, "message": message}))
+
+
+def main():
+    http_only = "--http-only" in sys.argv or os.environ.get("FIELD_PANEL_HTTP_ONLY") == "1"
+    if not http_only:
+        ros_setup()
+        ensure_mocap()
+        worker = threading.Thread(target=teleop_loop)
+        worker.daemon = True
+        worker.start()
+    server = HTTPServer((BIND, PORT), Handler)
+    print("xgc2 field panel http://%s:%d/  (http_only=%s)" % (BIND, PORT, http_only))
+    sys.stdout.flush()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    server.server_close()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,65 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# VRPN pose/twist -> PlanarStateEstimate. Same topics as the real car.
+from __future__ import print_function
+
+import os
+import sys
+
+import rospy
+from geometry_msgs.msg import PoseStamped, TwistStamped
+from rigid_state_estimator_msgs.msg import PlanarStateEstimate
+
+
+class Bridge(object):
+    def __init__(self):
+        tracker = rospy.get_param(
+            "~tracker", os.environ.get("FIELD_PANEL_TRACKER", "ugv1")
+        )
+        ns = rospy.get_param("~ns", os.environ.get("FIELD_PANEL_NS", "ugv1"))
+        pose = rospy.get_param(
+            "~pose_topic", "/vrpn_client_node/%s/pose" % tracker
+        )
+        twist = rospy.get_param(
+            "~twist_topic", "/vrpn_client_node/%s/twist" % tracker
+        )
+        state = rospy.get_param(
+            "~state_topic", "/%s/alg/state_estimator/state" % ns
+        )
+        self._twist = None
+        self.pub = rospy.Publisher(state, PlanarStateEstimate, queue_size=20)
+        rospy.Subscriber(pose, PoseStamped, self._on_pose, queue_size=20)
+        rospy.Subscriber(twist, TwistStamped, self._on_twist, queue_size=20)
+        rospy.loginfo("vrpn_to_planar_state %s + %s -> %s", pose, twist, state)
+
+    def _on_twist(self, msg):
+        self._twist = msg
+
+    def _on_pose(self, msg):
+        out = PlanarStateEstimate()
+        out.header = msg.header
+        out.estimator_state = PlanarStateEstimate.STATE_RUNNING
+        out.flags = 0
+        out.position = msg.pose.position
+        out.orientation = msg.pose.orientation
+        if self._twist is not None:
+            out.velocity = self._twist.twist.linear
+            out.angular_velocity = self._twist.twist.angular
+        out.vrpn_observation_state = PlanarStateEstimate.VRPN_HEALTH_TRUSTED
+        out.filter_health = PlanarStateEstimate.FILTER_HEALTH_NOMINAL
+        out.last_pose_accepted = True
+        out.last_fused_pose_stamp_sec = msg.header.stamp.to_sec()
+        self.pub.publish(out)
+
+
+def main():
+    rospy.init_node("vrpn_to_planar_state")
+    Bridge()
+    rospy.spin()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except rospy.ROSInterruptException:
+        sys.exit(0)
