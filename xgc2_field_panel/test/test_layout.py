@@ -13,7 +13,7 @@ PKG = ROOT / "xgc2_field_panel"
 def test_product_id() -> None:
     text = (ROOT / ".xgc2/product.yml").read_text()
     assert "id: xgc2-field-panel" in text
-    assert "version: 0.1.0-2" in text
+    assert "version: 0.1.0-3" in text
 
 
 def test_package_xml_has_no_first_party_depends() -> None:
@@ -45,6 +45,10 @@ def test_launch_and_scripts_parse() -> None:
     assert "def stop_stack(" in source
     assert "imu_topic:=/imu/data" in source
     assert 'STATE_SOURCE = os.environ.get("FIELD_PANEL_STATE_SOURCE", "estimator")' in source
+    assert "ESTIMATOR_RUNNING = 3" in source
+    assert "from rigid_state_estimator_msgs.msg import RigidStateEstimate" in source
+    assert "def _project_rigid_to_unicycle(" in source
+    assert "PlanarStateEstimate" not in source
     assert "vrpn_state" in source
     ast.parse((PKG / "scripts/vrpn_to_planar_state").read_text(), filename="vrpn_to_planar_state")
     html = (PKG / "web/index.html").read_text()

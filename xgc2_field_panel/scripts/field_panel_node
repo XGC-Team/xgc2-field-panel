@@ -37,7 +37,7 @@ try:
 except Exception:
     ScoutStatus = None
 
-ESTIMATOR_RUNNING = 2
+ESTIMATOR_RUNNING = 3
 
 BIND = os.environ.get("FIELD_PANEL_BIND", "0.0.0.0")
 PORT = int(os.environ.get("FIELD_PANEL_PORT", "8099"))
@@ -939,6 +939,21 @@ def _yaw_from_quat(q):
     return float(__import__("math").atan2(siny_cosp, cosy_cosp))
 
 
+def _project_rigid_to_unicycle(msg):
+    math = __import__("math")
+    yaw = _yaw_from_quat(msg.orientation)
+    vx = float(getattr(getattr(msg, "velocity", None), "x", 0.0) or 0.0)
+    vy = float(getattr(getattr(msg, "velocity", None), "y", 0.0) or 0.0)
+    wz = float(getattr(getattr(msg, "angular_velocity", None), "z", 0.0) or 0.0)
+    return {
+        "x": float(msg.position.x),
+        "y": float(msg.position.y),
+        "yaw": yaw,
+        "speed": math.cos(yaw) * vx + math.sin(yaw) * vy,
+        "yaw_rate": wz,
+    }
+
+
 def _on_alive(name, stale_s):
     def _cb(_msg):
         _note(name, {"alive": True}, stale_s)
@@ -972,18 +987,11 @@ def _on_vrpn(msg):
 
 
 def _on_estimator_state(msg):
-    _note(
-        "estimator",
-        {
-            "x": msg.position.x,
-            "y": msg.position.y,
-            "yaw": _yaw_from_quat(msg.orientation),
-            "estimator_state": int(getattr(msg, "estimator_state", 0) or 0),
-            "wz": float(getattr(msg.angular_velocity, "z", 0.0) or 0.0),
-            "alive": True,
-        },
-        0.3,
-    )
+    data = _project_rigid_to_unicycle(msg)
+    data["estimator_state"] = int(getattr(msg, "estimator_state", 0) or 0)
+    data["wz"] = data["yaw_rate"]
+    data["alive"] = True
+    _note("estimator", data, 0.3)
 
 
 def _on_nmpc_state(msg):
@@ -1037,9 +1045,9 @@ def ros_setup():
     state_topic = "/%s/alg/state_estimator/state" % NS
     estimator_bound = False
     try:
-        from rigid_state_estimator_msgs.msg import PlanarStateEstimate
+        from rigid_state_estimator_msgs.msg import RigidStateEstimate
 
-        rospy.Subscriber(state_topic, PlanarStateEstimate, _on_estimator_state)
+        rospy.Subscriber(state_topic, RigidStateEstimate, _on_estimator_state)
         estimator_bound = True
     except Exception:
         estimator_bound = False
