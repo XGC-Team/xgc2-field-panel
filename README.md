@@ -2,7 +2,9 @@
 
 车上独立 Web 面板。和 XGC2 Core / Agent / Experiment 并行。
 
-只做两件事：用 `roslaunch` 启停进程；订/发官方 ROS 消息。不 Depend 底盘、估计器、NMPC、动捕。那些包没装时，点启动会报错。
+只做两件事：用 `roslaunch --wait` 启停进程；订/发官方 ROS 消息。不 Depend 底盘、估计器、NMPC、动捕。那些包没装时，点启动会报错。
+
+感知（动捕 + `estimator_vrpn_ugv_state` 融合 `/imu/data`）和控制（参考 / NMPC / 摆渡）是两组启停。先看 IMU、CAN、动捕、估计是否新鲜，再启控制。默认 `FIELD_PANEL_STATE_SOURCE=estimator`。VRPN 直通是错误旁路。
 
 ## Package
 

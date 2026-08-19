@@ -13,7 +13,7 @@ PKG = ROOT / "xgc2_field_panel"
 def test_product_id() -> None:
     text = (ROOT / ".xgc2/product.yml").read_text()
     assert "id: xgc2-field-panel" in text
-    assert "version: 0.1.0-1" in text
+    assert "version: 0.1.0-2" in text
 
 
 def test_package_xml_has_no_first_party_depends() -> None:
@@ -37,24 +37,34 @@ def test_launch_and_scripts_parse() -> None:
     source = (PKG / "scripts/field_panel_node").read_text()
     ast.parse(source, filename="field_panel_node")
     assert source.splitlines()[1].startswith("# -*- coding: utf-8 -*-")
+    assert "def start_perception(" in source
+    assert "def stop_perception(" in source
+    assert "def start_control(" in source
+    assert "def stop_control(" in source
     assert "def start_stack(" in source
     assert "def stop_stack(" in source
+    assert "imu_topic:=/imu/data" in source
+    assert 'STATE_SOURCE = os.environ.get("FIELD_PANEL_STATE_SOURCE", "estimator")' in source
     assert "vrpn_state" in source
     ast.parse((PKG / "scripts/vrpn_to_planar_state").read_text(), filename="vrpn_to_planar_state")
     html = (PKG / "web/index.html").read_text()
-    assert "onclick=\"startStack()\"" in html
-    assert "onclick=\"stopStack()\"" in html
+    assert "onclick=\"startPerception()\"" in html
+    assert "onclick=\"stopPerception()\"" in html
+    assert "onclick=\"startControl()\"" in html
+    assert "onclick=\"stopControl()\"" in html
     assert "bindTeleopHold" in html
     assert "pressed: true" in html
     assert "按住移动，松开即停" in html
-    assert "/api/stack/start" in html
-    assert "/api/stack/stop" in html
+    assert "/api/perception/start" in html
+    assert "/api/control/start" in html
     assert "临时遥控" in html
     assert "/api/process/start" not in html
     assert "/api/config" in html
     assert 'id="params"' in html
     assert 'id="status"' in html
     assert 'id="control"' in html
+    assert "IMU" in html
+    assert "底盘 CAN" in html
     assert "动捕 VRPN" in html
     assert "状态估计" in html
     assert "估计 − 动捕" in html
@@ -67,17 +77,16 @@ def test_launch_and_scripts_parse() -> None:
     assert "100dvh" in html
     assert "touch-action: manipulation" in html
     assert "#control { order: 2;" in html
-    assert "100dvh" in html
-    assert html.count("id=\"stack-start\"") == 1
-    assert html.count("id=\"stack-stop\"") == 1
+    assert html.count('id="perception-start"') == 1
+    assert html.count('id="control-start"') == 1
     assert "def halt_until_stopped(" in source
     assert "def save_panel_config(" in source
     assert "def load_panel_config(" in source
     assert "def apply_teleop(" in source
     assert "_request_nmpc_hold" in source
     assert "shuttle_arrive_tol:=0.35" in source
-    assert "算法在跑或正在停止，不能遥控" in source
-    assert "算法运行或启停中，不能改参数" in source
+    assert "控制在跑或正在停止，不能遥控" in source
+    assert "感知或控制运行中，不能改参数" in source
     assert 'id="save-params"' in html
     assert (PKG / "web/index.html").is_file()
 
@@ -123,6 +132,10 @@ def test_config_persists_roundtrip() -> None:
         assert mod.STATE.shuttle_speed == 0.7
         assert mod.STATE.nmpc_max_v == 0.7
         assert mod.STATE.nmpc_min_v == -0.7
+        assert mod._use_estimator() is True
+        assert "estimator" in mod._perception_stack()
+        assert "nmpc" in mod._control_stack()
+        assert "nmpc" not in mod._perception_stack()
     finally:
         Path(path).unlink(missing_ok=True)
         Path(path + ".tmp").unlink(missing_ok=True)

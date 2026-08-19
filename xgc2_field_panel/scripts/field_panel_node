@@ -27,6 +27,17 @@ except ImportError:
     rospy = None
     AnyMsg = None
     String = None
+    Imu = None
+    PoseStamped = None
+    Twist = None
+    UInt32 = None
+
+try:
+    from scout_msgs.msg import ScoutStatus
+except Exception:
+    ScoutStatus = None
+
+ESTIMATOR_RUNNING = 2
 
 BIND = os.environ.get("FIELD_PANEL_BIND", "0.0.0.0")
 PORT = int(os.environ.get("FIELD_PANEL_PORT", "8099"))
@@ -223,14 +234,19 @@ class FieldState(object):
             teleop_active = (not self.estop) and (
                 self.teleop_fwd or self.teleop_back or self.teleop_left or self.teleop_right
             )
-            stack_running = any(
-                name in running_names
-                for name in ("vrpn_state", "estimator", "reference", "nmpc", "shuttle")
+            perception_running = any(
+                name in running_names for name in ("mocap", "estimator", "vrpn_state")
             )
+            control_running = any(
+                name in running_names for name in ("reference", "nmpc", "shuttle")
+            )
+            stack_running = perception_running or control_running
             if self.busy:
                 mode = "busy"
-            elif stack_running:
-                mode = "algorithm"
+            elif control_running:
+                mode = "control"
+            elif perception_running:
+                mode = "perception"
             elif teleop_active:
                 mode = "teleop"
             else:
@@ -280,6 +296,10 @@ class FieldState(object):
                 },
                 "busy": bool(self.busy),
                 "stack_running": stack_running,
+                "perception_running": perception_running,
+                "control_running": control_running,
+                "perception_ready": _perception_ready_from_topics(topics),
+                "control_ready": _control_ready_from_topics(topics),
                 "mode": mode,
                 "estop": self.estop,
                 "last_error": self.last_error,
@@ -364,7 +384,7 @@ PROCESS_PACKAGES = {
 
 # Panel owns algorithms only. Chassis / IMU / roscore stay on boot autostart.
 CMD_VEL_TOPIC = os.environ.get("FIELD_PANEL_CMD_VEL", "cmd_vel")
-STATE_SOURCE = os.environ.get("FIELD_PANEL_STATE_SOURCE", "auto")
+STATE_SOURCE = os.environ.get("FIELD_PANEL_STATE_SOURCE", "estimator")
 HOLD_TOPIC = os.environ.get("FIELD_PANEL_HOLD_TOPIC", "/command")
 TELEOP_V = 0.4
 TELEOP_W = 0.6
@@ -377,12 +397,33 @@ TELEOP_BUTTONS = {
 
 
 def _use_estimator():
-    mode = (STATE_SOURCE or "auto").strip().lower()
+    mode = (STATE_SOURCE or "estimator").strip().lower()
     if mode in ("vrpn", "vrpn_state", "mocap"):
         return False
-    if mode == "estimator":
-        return _package_present("estimator_vrpn_ugv_state")
-    return False
+    return True
+
+
+def _topic_ok(topics, name):
+    item = topics.get(name) or {}
+    return bool(item.get("ok"))
+
+
+def _perception_ready_from_topics(topics):
+    mocap_ok = _topic_ok(topics, "mocap")
+    est = (topics.get("estimator") or {}).get("data") or {}
+    est_ok = _topic_ok(topics, "estimator") and est.get("x") is not None
+    if _use_estimator():
+        state = est.get("estimator_state")
+        return mocap_ok and est_ok and state == ESTIMATOR_RUNNING
+    return mocap_ok and est_ok
+
+
+def _control_ready_from_topics(topics):
+    return (
+        _perception_ready_from_topics(topics)
+        and _topic_ok(topics, "imu")
+        and _topic_ok(topics, "scout_status")
+    )
 
 
 def _should_launch_mocap():
@@ -413,7 +454,7 @@ def start_process(name):
             return True, "%s already running" % name
         cmds = {
             "mocap": (
-                "roslaunch xgc2_vrpn_relay vrpn.launch server:=%s port:=%s tracker:=%s"
+                "roslaunch --wait xgc2_vrpn_relay vrpn.launch server:=%s port:=%s tracker:=%s"
                 % (STATE.vrpn_server, STATE.vrpn_port, STATE.tracker)
                 if _package_present("xgc2_vrpn_relay")
                 else "rosrun vrpn_client_ros vrpn_client_node "
@@ -422,7 +463,7 @@ def start_process(name):
                 % (STATE.vrpn_server, STATE.vrpn_port)
             ),
             "estimator": (
-                "roslaunch estimator_vrpn_ugv_state vrpn_ugv_state_estimator.launch "
+                "roslaunch --wait estimator_vrpn_ugv_state vrpn_ugv_state_estimator.launch "
                 "ns:=%s imu_topic:=/imu/data pose_topic:=/vrpn_client_node/%s/pose"
                 % (NS, STATE.tracker)
             ),
@@ -435,7 +476,7 @@ def start_process(name):
                 % (STATE.tracker, NS, STATE.tracker, STATE.tracker, NS)
             ),
             "nmpc": (
-                "roslaunch unicycle_ugv_controller ugv_unicycle_nmpc_controller.launch "
+                "roslaunch --wait unicycle_ugv_controller ugv_unicycle_nmpc_controller.launch "
                 "ns:=%s vrpn_rigid_body:=%s auto_start_tracking:=true "
                 "state_source:=%s cmd_vel_topic:=%s "
                 "min_linear_speed:=%s max_linear_speed:=%s max_angular_speed:=%s"
@@ -450,11 +491,11 @@ def start_process(name):
                 )
             ),
             "reference": (
-                "roslaunch unicycle_reference_trajectory ugv_unicycle_reference_trajectory.launch "
+                "roslaunch --wait unicycle_reference_trajectory ugv_unicycle_reference_trajectory.launch "
                 "ns:=%s default_analytic_enabled:=false" % NS
             ),
             "shuttle": (
-                "roslaunch unicycle_reference_trajectory ugv_unicycle_target_replanner.launch "
+                "roslaunch --wait unicycle_reference_trajectory ugv_unicycle_target_replanner.launch "
                 "ns:=%s random_targets:=false shuttle_mode:=true replan_period:=1.0 "
                 "shuttle_x:=%s shuttle_y_min:=%s shuttle_y_max:=%s shuttle_speed:=%s "
                 "shuttle_arrive_tol:=0.35 shuttle_yaw_tol:=0.7"
@@ -522,29 +563,56 @@ def stop_process(name):
         return True, "stopped %s" % name
 
 
-_STACK_CACHE = None
-
-
-def _algorithm_stack():
-    global _STACK_CACHE
-    if _STACK_CACHE is not None:
-        return list(_STACK_CACHE)
-    names = []
+def _perception_stack():
+    names = ["mocap"]
     if _use_estimator():
         names.append("estimator")
     else:
         names.append("vrpn_state")
-    names.extend(["reference", "nmpc", "shuttle"])
-    _STACK_CACHE = list(names)
     return names
 
 
-def _stack_running():
-    for name in _algorithm_stack():
+def _control_stack():
+    return ["reference", "nmpc", "shuttle"]
+
+
+def _algorithm_stack():
+    return _perception_stack() + _control_stack()
+
+
+def _names_running(names):
+    for name in names:
         proc = STATE.procs.get(name)
         if proc is not None and proc.poll() is None:
             return True
     return False
+
+
+def _perception_running():
+    return _names_running(_perception_stack())
+
+
+def _control_running():
+    return _names_running(_control_stack())
+
+
+def _stack_running():
+    return _perception_running() or _control_running()
+
+
+def _live_topics():
+    return STATE.snapshot()["topics"]
+
+
+def _wait_ready(predicate, timeout, label):
+    deadline = time.time() + max(0.4, float(timeout))
+    last = None
+    while time.time() < deadline:
+        last = predicate()
+        if last:
+            return True, ""
+        time.sleep(0.15)
+    return False, "%s 未就绪" % label
 
 
 def _teleop_active():
@@ -659,9 +727,9 @@ def apply_teleop(payload):
             return False, "estop"
         if STATE.busy:
             return False, "正在启停算法，不能遥控"
-        if _stack_running():
+        if _control_running():
             _clear_teleop()
-            return False, "算法在跑或正在停止，不能遥控"
+            return False, "控制在跑或正在停止，不能遥控"
         button = str(payload.get("button") or "").strip().lower()
         if button in ("stop", "clear") or payload.get("clear"):
             _clear_teleop()
@@ -690,59 +758,111 @@ def apply_teleop(payload):
         return True, "遥控 %s" % button
 
 
-def start_stack():
+def _start_named(names, verb):
+    started = []
+    for name in names:
+        ok, message = start_process(name)
+        if not ok:
+            for prev in reversed(started):
+                stop_process(prev)
+            with STATE.lock:
+                STATE.last_error = "启动失败：%s — %s" % (name, message)
+            return False, STATE.last_error
+        started.append(name)
+    if not started:
+        return False, "没有可启动的%s包" % verb
+    with STATE.lock:
+        STATE.last_error = ""
+    return True, "已启动%s" % verb
+
+
+def start_perception():
     with STATE.lock:
         if STATE.busy:
             return False, "正在处理上一次启停"
-        if _teleop_active():
-            return False, "遥控按下中，先松开遥控再启停算法"
-        if _stack_running():
-            _request_nmpc_track()
-            return True, "算法已在运行"
+        if _perception_running():
+            return True, "感知已在运行"
         STATE.busy = True
-        _clear_teleop()
-    _request_nmpc_track()
-    started = []
     try:
-        for name in _algorithm_stack():
-            ok, message = start_process(name)
-            if not ok:
-                halt_until_stopped(1.2)
-                for prev in reversed(started):
-                    stop_process(prev)
-                _publish_zero_cmd()
-                with STATE.lock:
-                    STATE.last_error = "启动失败：%s — %s" % (name, message)
-                return False, STATE.last_error
-            started.append(name)
-        with STATE.lock:
-            STATE.last_error = ""
-        if not started:
-            return False, "没有可启动的算法包"
-        _request_nmpc_track()
-        return True, "已启动算法"
+        if not _use_estimator():
+            with STATE.lock:
+                STATE.last_error = "FIELD_PANEL_STATE_SOURCE 仍是 VRPN 直通；这是错误旁路"
+        ok, message = _start_named(_perception_stack(), "感知")
+        if ok and not _use_estimator():
+            return True, message + "（警告：VRPN 直通，未融合 IMU）"
+        return ok, message
     finally:
         with STATE.lock:
             STATE.busy = False
 
 
-def stop_stack():
+def stop_perception():
+    with STATE.lock:
+        if STATE.busy:
+            return False, "正在处理上一次启停"
+        if _control_running():
+            return False, "控制还在跑，先停控制"
+        if _teleop_active():
+            return False, "遥控按下中，先松开遥控"
+        STATE.busy = True
+    try:
+        for name in reversed(_perception_stack()):
+            stop_process(name)
+        with STATE.lock:
+            STATE.last_error = ""
+        return True, "已停止感知"
+    finally:
+        with STATE.lock:
+            STATE.busy = False
+
+
+def start_control():
     with STATE.lock:
         if STATE.busy:
             return False, "正在处理上一次启停"
         if _teleop_active():
-            return False, "遥控按下中，先松开遥控再启停算法"
+            return False, "遥控按下中，先松开遥控再启控制"
+        if _control_running():
+            _request_nmpc_track()
+            return True, "控制已在运行"
+        STATE.busy = True
+        _clear_teleop()
+    try:
+        if not _perception_running():
+            with STATE.lock:
+                STATE.last_error = "先启动感知（动捕 + 状态估计）"
+            return False, STATE.last_error
+        ready, detail = _wait_ready(
+            lambda: _control_ready_from_topics(_live_topics()),
+            8.0,
+            "IMU / 底盘 / 动捕 / 估计",
+        )
+        if not ready:
+            with STATE.lock:
+                STATE.last_error = "感知未就绪，不能启动控制：%s" % detail
+            return False, STATE.last_error
+        _request_nmpc_track()
+        ok, message = _start_named(_control_stack(), "控制")
+        if ok:
+            _request_nmpc_track()
+        return ok, message
+    finally:
+        with STATE.lock:
+            STATE.busy = False
+
+
+def stop_control():
+    with STATE.lock:
+        if STATE.busy:
+            return False, "正在处理上一次启停"
+        if _teleop_active():
+            return False, "遥控按下中，先松开遥控再停控制"
         STATE.busy = True
     try:
         if not halt_until_stopped(2.5):
             _request_nmpc_hold()
             halt_until_stopped(1.5)
-        names = [
-            n
-            for n in ("nmpc", "shuttle", "reference", "estimator", "vrpn_state")
-            if n in _algorithm_stack() or n in STATE.procs
-        ]
-        for name in names:
+        for name in reversed(_control_stack()):
             stop_process(name)
         stopped = halt_until_stopped(1.5)
         if not stopped:
@@ -751,13 +871,31 @@ def stop_stack():
         with STATE.lock:
             if stopped:
                 STATE.last_error = ""
-                return True, "已确认停车并停止算法"
+                return True, "已确认停车并停止控制"
             STATE.last_error = "进程已关，但未确认车已停住，仍在发零速度"
             return False, STATE.last_error
     finally:
         _publish_zero_cmd()
         with STATE.lock:
             STATE.busy = False
+
+
+def start_stack():
+    ok, message = start_perception()
+    if not ok:
+        return ok, message
+    ok, control_message = start_control()
+    if not ok:
+        return ok, message + "；" + control_message
+    return True, message + "；" + control_message
+
+
+def stop_stack():
+    ok_c, msg_c = stop_control()
+    ok_p, msg_p = stop_perception()
+    if ok_c and ok_p:
+        return True, msg_c + "；" + msg_p
+    return False, msg_c + "；" + msg_p
 
 
 def apply_shuttle_params():
@@ -776,8 +914,8 @@ def apply_config(payload):
     if not isinstance(payload, dict):
         return False, "bad config"
     with STATE.lock:
-        if STATE.busy or _stack_running():
-            return False, "算法运行或启停中，不能改参数"
+        if STATE.busy or _perception_running() or _control_running():
+            return False, "感知或控制运行中，不能改参数"
         prev = (STATE.vrpn_server, STATE.vrpn_port, STATE.tracker)
         apply_saved_config(payload)
         saved = save_panel_config()
@@ -840,6 +978,8 @@ def _on_estimator_state(msg):
             "x": msg.position.x,
             "y": msg.position.y,
             "yaw": _yaw_from_quat(msg.orientation),
+            "estimator_state": int(getattr(msg, "estimator_state", 0) or 0),
+            "wz": float(getattr(msg.angular_velocity, "z", 0.0) or 0.0),
             "alive": True,
         },
         0.3,
@@ -851,7 +991,23 @@ def _on_nmpc_state(msg):
 
 
 def _on_imu(msg):
-    _note("imu", {"ok": True}, 0.3)
+    wz = 0.0
+    try:
+        wz = float(msg.angular_velocity.z)
+    except Exception:
+        wz = 0.0
+    _note("imu", {"ok": True, "wz": wz}, 0.3)
+
+
+def _on_scout_status(msg):
+    data = {"ok": True}
+    for key in ("battery_voltage", "voltage", "linear_velocity"):
+        if hasattr(msg, key):
+            try:
+                data[key] = float(getattr(msg, key))
+            except (TypeError, ValueError):
+                pass
+    _note("scout_status", data, 0.3)
 
 
 def _on_cmd(msg):
@@ -871,7 +1027,12 @@ def ros_setup():
     rospy.Subscriber(
         "/%s/alg/unicycle_ugv_controller/status/control_state" % NS, UInt32, _on_nmpc_state
     )
-    rospy.Subscriber("/imu/data", Imu, _on_imu)
+    if Imu is not None:
+        rospy.Subscriber("/imu/data", Imu, _on_imu)
+    if ScoutStatus is not None:
+        rospy.Subscriber("/scout_status", ScoutStatus, _on_scout_status)
+    elif AnyMsg is not None:
+        rospy.Subscriber("/scout_status", AnyMsg, _on_alive("scout_status", 0.3))
     rospy.Subscriber(_cmd_vel_topic(), Twist, _on_cmd)
     state_topic = "/%s/alg/state_estimator/state" % NS
     estimator_bound = False
@@ -901,7 +1062,7 @@ def teleop_loop():
             allowed = (
                 (not STATE.estop)
                 and (not STATE.busy)
-                and (not _stack_running())
+                and (not _control_running())
                 and _teleop_active()
             )
             twist = Twist()
@@ -957,7 +1118,15 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path
         ok = False
         message = "unknown"
-        if path == "/api/stack/start":
+        if path == "/api/perception/start":
+            ok, message = start_perception()
+        elif path == "/api/perception/stop":
+            ok, message = stop_perception()
+        elif path == "/api/control/start":
+            ok, message = start_control()
+        elif path == "/api/control/stop":
+            ok, message = stop_control()
+        elif path == "/api/stack/start":
             ok, message = start_stack()
         elif path == "/api/stack/stop":
             ok, message = stop_stack()
@@ -977,7 +1146,6 @@ def main():
     http_only = "--http-only" in sys.argv or os.environ.get("FIELD_PANEL_HTTP_ONLY") == "1"
     if not http_only:
         ros_setup()
-        ensure_mocap()
         worker = threading.Thread(target=teleop_loop)
         worker.daemon = True
         worker.start()

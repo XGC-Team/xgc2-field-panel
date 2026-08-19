@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# VRPN pose/twist -> PlanarStateEstimate. Same topics as the real car.
+# Emergency VRPN copy only. Production must fuse IMU + VRPN in
+# estimator_vrpn_ugv_state. Do not select this as the field default.
 from __future__ import print_function
 
 import os

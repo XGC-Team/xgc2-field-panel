@@ -84,7 +84,8 @@
     #msg.ok { background: #e8f7ee; color: #064; }
     #msg.bad { background: #fde8e8; color: #800; font-weight: 700; }
     #mode { font-size: 14px; }
-    #teleop.locked, #params.locked { opacity: 0.45; pointer-events: none; }
+    #teleop.locked, #params.locked, #control-actions.locked { opacity: 0.45; pointer-events: none; }
+    .split { display: flex; flex-wrap: wrap; gap: 12px 20px; }
     .pad button {
       min-height: 44px;
       user-select: none;
@@ -195,12 +196,26 @@
   </section>
 
   <section id="status">
-    <h2>状态检查　算法：<span id="mode"></span>　NMPC：<span id="nmpc-state"></span></h2>
+    <h2>状态检查　<span id="mode"></span>　NMPC：<span id="nmpc-state"></span></h2>
     <table>
       <thead>
         <tr><th>来源</th><th>是否新鲜</th><th>X / v</th><th>Y / w</th><th>航向 / 内容</th></tr>
       </thead>
       <tbody>
+        <tr>
+          <td>IMU</td>
+          <td id="imu-ok"></td>
+          <td id="imu-x" class="num"></td>
+          <td id="imu-y" class="num"></td>
+          <td id="imu-yaw" class="num"></td>
+        </tr>
+        <tr>
+          <td>底盘 CAN</td>
+          <td id="can-ok"></td>
+          <td id="can-x" class="num"></td>
+          <td id="can-y" class="num"></td>
+          <td id="can-yaw" class="num"></td>
+        </tr>
         <tr>
           <td>动捕 VRPN</td>
           <td id="mocap-ok"></td>
@@ -236,10 +251,22 @@
   <section id="control">
     <div class="control-body">
       <div class="control-main">
-        <h2>控制</h2>
-        <div class="row">
-          <button class="go" id="stack-start" onclick="startStack()">启动</button>
-          <button class="danger" id="stack-stop" onclick="stopStack()">停止</button>
+        <h2>启停</h2>
+        <div class="split">
+          <div>
+            <div class="note">感知：动捕 + IMU 融合估计</div>
+            <div class="row">
+              <button class="go" id="perception-start" onclick="startPerception()">启动感知</button>
+              <button class="danger" id="perception-stop" onclick="stopPerception()">停止感知</button>
+            </div>
+          </div>
+          <div id="control-actions">
+            <div class="note">控制：估计就绪后才能启动</div>
+            <div class="row">
+              <button class="go" id="control-start" onclick="startControl()">启动控制</button>
+              <button class="danger" id="control-stop" onclick="stopControl()">停止控制</button>
+            </div>
+          </div>
         </div>
       </div>
       <div id="teleop">
@@ -316,33 +343,37 @@ async function post(url, body) {
   return data;
 }
 
-async function startStack() {
-  const btn = document.getElementById("stack-start");
-  btn.disabled = true;
-  say("正在启动算法…", true);
+async function runAction(id, url, text) {
+  const btn = document.getElementById(id);
+  if (btn) btn.disabled = true;
+  say(text, true);
   try {
-    await post("/api/stack/start", {});
+    await post(url, {});
     await refresh();
   } finally {
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 
-async function stopStack() {
-  const btn = document.getElementById("stack-stop");
-  btn.disabled = true;
-  say("正在停车并停止算法…", true);
-  try {
-    await post("/api/stack/stop", {});
-    await refresh();
-  } finally {
-    btn.disabled = false;
-  }
+async function startPerception() {
+  await runAction("perception-start", "/api/perception/start", "正在启动感知…");
+}
+
+async function stopPerception() {
+  await runAction("perception-stop", "/api/perception/stop", "正在停止感知…");
+}
+
+async function startControl() {
+  await runAction("control-start", "/api/control/start", "正在启动控制…");
+}
+
+async function stopControl() {
+  await runAction("control-stop", "/api/control/stop", "正在停车并停止控制…");
 }
 
 async function saveConfig() {
-  if (lastStatus.stack_running || lastStatus.busy) {
-    say("算法运行或启停中，不能改参数", false);
+  if (lastStatus.perception_running || lastStatus.control_running || lastStatus.busy) {
+    say("感知或控制运行中，不能改参数", false);
     return;
   }
   const body = {
@@ -359,26 +390,35 @@ async function saveConfig() {
 }
 
 function applyLocks(s) {
-  const stack = !!s.stack_running;
+  const perception = !!s.perception_running;
+  const control = !!s.control_running;
+  const ready = !!s.control_ready;
   const teleop = !!s.teleop_active;
   const busy = !!s.busy;
-  document.getElementById("stack-start").disabled = stack || teleop || busy;
-  document.getElementById("stack-stop").disabled = teleop || busy;
-  document.getElementById("teleop").classList.toggle("locked", stack || busy);
-  document.getElementById("params").classList.toggle("locked", stack || busy);
+  document.getElementById("perception-start").disabled = perception || busy;
+  document.getElementById("perception-stop").disabled = busy || control;
+  document.getElementById("control-start").disabled = control || teleop || busy || !ready;
+  document.getElementById("control-stop").disabled = teleop || busy || !control;
+  document.getElementById("control-actions").classList.toggle("locked", !ready && !control);
+  document.getElementById("teleop").classList.toggle("locked", control || busy);
+  document.getElementById("params").classList.toggle("locked", perception || control || busy);
   const saveBtn = document.getElementById("save-params");
-  if (saveBtn) saveBtn.disabled = stack || busy;
+  if (saveBtn) saveBtn.disabled = perception || control || busy;
   const inputs = document.querySelectorAll("#params input");
-  for (let i = 0; i < inputs.length; i++) inputs[i].disabled = stack || busy;
+  for (let i = 0; i < inputs.length; i++) inputs[i].disabled = perception || control || busy;
   const mode = document.getElementById("mode");
   if (busy) {
     mode.textContent = "正在启停";
     mode.className = "";
     document.getElementById("teleop-note").textContent = "正在启停，遥控已锁定。";
-  } else if (stack) {
-    mode.textContent = "已启动";
+  } else if (control) {
+    mode.textContent = "控制已启动";
     mode.className = "ok";
-    document.getElementById("teleop-note").textContent = "算法在跑，遥控已锁定。";
+    document.getElementById("teleop-note").textContent = "控制在跑，遥控已锁定。";
+  } else if (perception) {
+    mode.textContent = ready ? "感知就绪" : "感知运行中";
+    mode.className = ready ? "ok" : "";
+    document.getElementById("teleop-note").textContent = "先看 IMU / CAN / 动捕 / 估计，再启动控制。";
   } else if (teleop) {
     mode.textContent = "遥控中";
     mode.className = "ok";
@@ -409,6 +449,8 @@ function renderTeleop(s) {
 
 function renderStatus(s) {
   const topics = s.topics || {};
+  const imu = topics.imu || {};
+  const can = topics.scout_status || {};
   const mocap = topics.mocap || {};
   const est = topics.estimator || {};
   const nmpc = topics.nmpc || {};
@@ -417,6 +459,16 @@ function renderStatus(s) {
   const delta = cmp.delta || null;
   const md = mocap.data || {};
   const ed = est.data || {};
+  const idata = imu.data || {};
+  const cdata = can.data || {};
+  setFresh("imu-ok", !!imu.ok);
+  document.getElementById("imu-x").textContent = "—";
+  document.getElementById("imu-y").textContent = "—";
+  document.getElementById("imu-yaw").textContent = idata.wz == null ? "—" : ("wz " + fmt(idata.wz, 3));
+  setFresh("can-ok", !!can.ok);
+  document.getElementById("can-x").textContent = cdata.battery_voltage == null ? "—" : fmt(cdata.battery_voltage, 1);
+  document.getElementById("can-y").textContent = "—";
+  document.getElementById("can-yaw").textContent = can.ok ? "/scout_status" : "—";
   setFresh("mocap-ok", !!mocap.ok);
   setFresh("est-ok", !!(est.ok && ed.x !== undefined));
   document.getElementById("mocap-x").textContent = fmt(md.x, 3);
@@ -475,8 +527,8 @@ async function refresh() {
 }
 
 async function toggleTeleop(button) {
-  if (lastStatus.stack_running || lastStatus.busy) {
-    say("算法在跑或正在停止，不能遥控", false);
+  if (lastStatus.control_running || lastStatus.busy) {
+    say("控制在跑或正在停止，不能遥控", false);
     return;
   }
   const body = button === "stop" ? {button: "stop"} : {button: button, pressed: false};
@@ -491,8 +543,8 @@ function bindTeleopHold(name) {
   const down = function (ev) {
     ev.preventDefault();
     if (held) return;
-    if (lastStatus.stack_running || lastStatus.busy) {
-      say("算法在跑或正在停止，不能遥控", false);
+    if (lastStatus.control_running || lastStatus.busy) {
+      say("控制在跑或正在停止，不能遥控", false);
       return;
     }
     held = true;
