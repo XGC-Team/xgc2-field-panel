@@ -1009,7 +1009,7 @@ def _on_imu(msg):
 
 def _on_scout_status(msg):
     data = {"ok": True}
-    for key in ("battery_voltage", "voltage", "linear_velocity"):
+    for key in ("battery_voltage", "voltage", "linear_velocity", "angular_velocity"):
         if hasattr(msg, key):
             try:
                 data[key] = float(getattr(msg, key))

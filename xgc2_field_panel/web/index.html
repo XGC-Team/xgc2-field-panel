@@ -63,9 +63,11 @@
     table { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: clamp(11px, 1.5vh, 13px); }
     th:nth-child(1) { width: 7em; }
     th:nth-child(2) { width: 4.2em; }
-    th:nth-child(3), th:nth-child(4), th:nth-child(5) { width: 9ch; }
     td, th { border-bottom: 1px solid #ddd; padding: 3px 6px; text-align: left; white-space: nowrap; overflow: hidden; }
-    td.num, th.num { text-align: right; }
+    td.vals { white-space: normal; overflow: visible; }
+    .kvs { display: flex; flex-wrap: wrap; gap: 2px 12px; justify-content: flex-end; }
+    .kv { display: inline-flex; align-items: baseline; gap: 4px; }
+    .kv .k { color: #555; font-size: 0.92em; }
     .ok { color: #0a6; font-weight: 700; }
     .bad { color: #b00; font-weight: 700; }
     .control-body { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
@@ -199,50 +201,38 @@
     <h2>状态检查　<span id="mode"></span>　NMPC：<span id="nmpc-state"></span></h2>
     <table>
       <thead>
-        <tr><th>来源</th><th>是否新鲜</th><th>X / v</th><th>Y / w</th><th>航向 / 内容</th></tr>
+        <tr><th>来源</th><th>是否新鲜</th><th>读数</th></tr>
       </thead>
       <tbody>
         <tr>
           <td>IMU</td>
           <td id="imu-ok"></td>
-          <td id="imu-x" class="num"></td>
-          <td id="imu-y" class="num"></td>
-          <td id="imu-yaw" class="num"></td>
+          <td id="imu-vals" class="vals"></td>
         </tr>
         <tr>
           <td>底盘 CAN</td>
           <td id="can-ok"></td>
-          <td id="can-x" class="num"></td>
-          <td id="can-y" class="num"></td>
-          <td id="can-yaw" class="num"></td>
+          <td id="can-vals" class="vals"></td>
         </tr>
         <tr>
           <td>动捕 VRPN</td>
           <td id="mocap-ok"></td>
-          <td id="mocap-x" class="num"></td>
-          <td id="mocap-y" class="num"></td>
-          <td id="mocap-yaw" class="num"></td>
+          <td id="mocap-vals" class="vals"></td>
         </tr>
         <tr>
           <td>状态估计</td>
           <td id="est-ok"></td>
-          <td id="est-x" class="num"></td>
-          <td id="est-y" class="num"></td>
-          <td id="est-yaw" class="num"></td>
+          <td id="est-vals" class="vals"></td>
         </tr>
         <tr>
           <td>估计 − 动捕</td>
           <td id="delta-ok"></td>
-          <td id="delta-x" class="num"></td>
-          <td id="delta-y" class="num"></td>
-          <td id="delta-yaw" class="num"></td>
+          <td id="delta-vals" class="vals"></td>
         </tr>
         <tr>
           <td>cmd_vel</td>
           <td id="cmd-ok"></td>
-          <td id="cmd-v" class="num"></td>
-          <td id="cmd-w" class="num"></td>
-          <td id="cmd-raw" class="num"></td>
+          <td id="cmd-vals" class="vals"></td>
         </tr>
       </tbody>
     </table>
@@ -324,6 +314,28 @@ function setFresh(id, ok) {
   const el = document.getElementById(id);
   el.textContent = ok ? "新鲜" : "超时";
   el.className = ok ? "ok" : "bad";
+}
+
+function setKVs(id, items) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = "";
+  const row = document.createElement("div");
+  row.className = "kvs";
+  items.forEach((item) => {
+    const wrap = document.createElement("span");
+    wrap.className = "kv";
+    const k = document.createElement("span");
+    k.className = "k";
+    k.textContent = item.label;
+    const v = document.createElement("span");
+    v.className = "v num";
+    v.textContent = item.value;
+    wrap.appendChild(k);
+    wrap.appendChild(v);
+    row.appendChild(wrap);
+  });
+  el.appendChild(row);
 }
 
 async function post(url, body) {
@@ -462,31 +474,39 @@ function renderStatus(s) {
   const idata = imu.data || {};
   const cdata = can.data || {};
   setFresh("imu-ok", !!imu.ok);
-  document.getElementById("imu-x").textContent = "—";
-  document.getElementById("imu-y").textContent = "—";
-  document.getElementById("imu-yaw").textContent = idata.wz == null ? "—" : ("wz " + fmt(idata.wz, 3));
+  setKVs("imu-vals", [{label: "wz", value: fmt(idata.wz, 3)}]);
   setFresh("can-ok", !!can.ok);
-  document.getElementById("can-x").textContent = cdata.battery_voltage == null ? "—" : fmt(cdata.battery_voltage, 1);
-  document.getElementById("can-y").textContent = "—";
-  document.getElementById("can-yaw").textContent = can.ok ? "/scout_status" : "—";
+  setKVs("can-vals", [
+    {label: "电压", value: cdata.battery_voltage == null ? "—" : (fmt(cdata.battery_voltage, 1) + " V")},
+    {label: "v", value: fmt(cdata.linear_velocity, 3)},
+    {label: "w", value: fmt(cdata.angular_velocity, 3)}
+  ]);
   setFresh("mocap-ok", !!mocap.ok);
   setFresh("est-ok", !!(est.ok && ed.x !== undefined));
-  document.getElementById("mocap-x").textContent = fmt(md.x, 3);
-  document.getElementById("mocap-y").textContent = fmt(md.y, 3);
-  document.getElementById("mocap-yaw").textContent = fmt(md.yaw, 3);
-  document.getElementById("est-x").textContent = fmt(ed.x, 3);
-  document.getElementById("est-y").textContent = fmt(ed.y, 3);
-  document.getElementById("est-yaw").textContent = fmt(ed.yaw, 3);
+  setKVs("mocap-vals", [
+    {label: "X", value: fmt(md.x, 3)},
+    {label: "Y", value: fmt(md.y, 3)},
+    {label: "yaw", value: fmt(md.yaw, 3)}
+  ]);
+  setKVs("est-vals", [
+    {label: "X", value: fmt(ed.x, 3)},
+    {label: "Y", value: fmt(ed.y, 3)},
+    {label: "yaw", value: fmt(ed.yaw, 3)}
+  ]);
   if (delta) {
     setFresh("delta-ok", !!(mocap.ok && est.ok));
-    document.getElementById("delta-x").textContent = fmt(delta.dx, 3);
-    document.getElementById("delta-y").textContent = fmt(delta.dy, 3);
-    document.getElementById("delta-yaw").textContent = fmt(delta.dyaw, 3);
+    setKVs("delta-vals", [
+      {label: "Δx", value: fmt(delta.dx, 3)},
+      {label: "Δy", value: fmt(delta.dy, 3)},
+      {label: "Δyaw", value: fmt(delta.dyaw, 3)}
+    ]);
   } else {
     setFresh("delta-ok", false);
-    document.getElementById("delta-x").textContent = "—";
-    document.getElementById("delta-y").textContent = "—";
-    document.getElementById("delta-yaw").textContent = "—";
+    setKVs("delta-vals", [
+      {label: "Δx", value: fmt(undefined, 3)},
+      {label: "Δy", value: fmt(undefined, 3)},
+      {label: "Δyaw", value: fmt(undefined, 3)}
+    ]);
   }
   const n = nmpc.data && nmpc.data.control_state;
   const nmpcEl = document.getElementById("nmpc-state");
@@ -498,15 +518,10 @@ function renderStatus(s) {
     nmpcEl.className = "bad";
   }
   setFresh("cmd-ok", !!cmd.ok);
-  if (cmd.data) {
-    document.getElementById("cmd-v").textContent = fmt(cmd.data.v, 3);
-    document.getElementById("cmd-w").textContent = fmt(cmd.data.w, 3);
-    document.getElementById("cmd-raw").textContent = fmt(cmd.data.v, 3) + "  " + fmt(cmd.data.w, 3);
-  } else {
-    document.getElementById("cmd-v").textContent = "—";
-    document.getElementById("cmd-w").textContent = "—";
-    document.getElementById("cmd-raw").textContent = "—";
-  }
+  setKVs("cmd-vals", [
+    {label: "v", value: fmt(cmd.data && cmd.data.v, 3)},
+    {label: "w", value: fmt(cmd.data && cmd.data.w, 3)}
+  ]);
 }
 
 async function refresh() {

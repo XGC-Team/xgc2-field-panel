@@ -13,7 +13,7 @@ PKG = ROOT / "xgc2_field_panel"
 def test_product_id() -> None:
     text = (ROOT / ".xgc2/product.yml").read_text()
     assert "id: xgc2-field-panel" in text
-    assert "version: 0.1.0-3" in text
+    assert "version: 0.1.0-4" in text
 
 
 def test_package_xml_has_no_first_party_depends() -> None:
@@ -73,6 +73,15 @@ def test_launch_and_scripts_parse() -> None:
     assert "状态估计" in html
     assert "估计 − 动捕" in html
     assert "cmd_vel" in html
+    assert "X / v" not in html
+    assert "Y / w" not in html
+    assert "航向 / 内容" not in html
+    assert 'id="imu-vals"' in html
+    assert 'id="can-vals"' in html
+    assert 'label: "电压"' in html
+    assert 'label: "wz"' in html
+    assert 'label: "X"' in html
+    assert 'label: "Δx"' in html
     assert "开机自启" not in html
     assert "roscore" not in html
     assert "class=\"actions\"" in html
