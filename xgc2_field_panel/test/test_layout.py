@@ -13,7 +13,7 @@ PKG = ROOT / "xgc2_field_panel"
 def test_product_id() -> None:
     text = (ROOT / ".xgc2/product.yml").read_text()
     assert "id: xgc2-field-panel" in text
-    assert "version: 0.1.0-4" in text
+    assert "version: 0.1.0-5" in text
 
 
 def test_package_xml_has_no_first_party_depends() -> None:
