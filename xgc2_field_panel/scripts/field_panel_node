@@ -464,7 +464,7 @@ def start_process(name):
             ),
             "estimator": (
                 "roslaunch --wait estimator_vrpn_ugv_state vrpn_ugv_state_estimator.launch "
-                "ns:=%s imu_topic:=/imu/data pose_topic:=/vrpn_client_node/%s/pose"
+                "ns:=%s imu_topic:=/imu/data_raw pose_topic:=/vrpn_client_node/%s/pose"
                 % (NS, STATE.tracker)
             ),
             "vrpn_state": (

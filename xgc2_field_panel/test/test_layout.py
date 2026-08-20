@@ -43,7 +43,7 @@ def test_launch_and_scripts_parse() -> None:
     assert "def stop_control(" in source
     assert "def start_stack(" in source
     assert "def stop_stack(" in source
-    assert "imu_topic:=/imu/data" in source
+    assert "imu_topic:=/imu/data_raw" in source
     assert 'STATE_SOURCE = os.environ.get("FIELD_PANEL_STATE_SOURCE", "estimator")' in source
     assert "ESTIMATOR_RUNNING = 3" in source
     assert "from rigid_state_estimator_msgs.msg import RigidStateEstimate" in source
