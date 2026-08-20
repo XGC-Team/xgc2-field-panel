@@ -38,6 +38,8 @@ except Exception:
     ScoutStatus = None
 
 ESTIMATOR_RUNNING = 3
+# Chassis HI226 publishes raw IMU here. /imu/data is reserved for a fused estimate.
+IMU_TOPIC = "/imu/data_raw"
 
 BIND = os.environ.get("FIELD_PANEL_BIND", "0.0.0.0")
 PORT = int(os.environ.get("FIELD_PANEL_PORT", "8099"))
@@ -464,8 +466,8 @@ def start_process(name):
             ),
             "estimator": (
                 "roslaunch --wait estimator_vrpn_ugv_state vrpn_ugv_state_estimator.launch "
-                "ns:=%s imu_topic:=/imu/data_raw pose_topic:=/vrpn_client_node/%s/pose"
-                % (NS, STATE.tracker)
+                "ns:=%s imu_topic:=%s pose_topic:=/vrpn_client_node/%s/pose"
+                % (NS, IMU_TOPIC, STATE.tracker)
             ),
             "vrpn_state": (
                 "rosrun xgc2_field_panel vrpn_to_planar_state "
@@ -1036,7 +1038,7 @@ def ros_setup():
         "/%s/alg/unicycle_ugv_controller/status/control_state" % NS, UInt32, _on_nmpc_state
     )
     if Imu is not None:
-        rospy.Subscriber("/imu/data", Imu, _on_imu)
+        rospy.Subscriber(IMU_TOPIC, Imu, _on_imu)
     if ScoutStatus is not None:
         rospy.Subscriber("/scout_status", ScoutStatus, _on_scout_status)
     elif AnyMsg is not None:

@@ -13,7 +13,7 @@ PKG = ROOT / "xgc2_field_panel"
 def test_product_id() -> None:
     text = (ROOT / ".xgc2/product.yml").read_text()
     assert "id: xgc2-field-panel" in text
-    assert "version: 0.1.0-5" in text
+    assert "version: 0.1.0-6" in text
 
 
 def test_package_xml_has_no_first_party_depends() -> None:
@@ -43,7 +43,10 @@ def test_launch_and_scripts_parse() -> None:
     assert "def stop_control(" in source
     assert "def start_stack(" in source
     assert "def stop_stack(" in source
-    assert "imu_topic:=/imu/data_raw" in source
+    assert 'IMU_TOPIC = "/imu/data_raw"' in source
+    assert "imu_topic:=%s" in source
+    assert "rospy.Subscriber(IMU_TOPIC, Imu, _on_imu)" in source
+    assert 'Subscriber("/imu/data"' not in source
     assert 'STATE_SOURCE = os.environ.get("FIELD_PANEL_STATE_SOURCE", "estimator")' in source
     assert "ESTIMATOR_RUNNING = 3" in source
     assert "from rigid_state_estimator_msgs.msg import RigidStateEstimate" in source

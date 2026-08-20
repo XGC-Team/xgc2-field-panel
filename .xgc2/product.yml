@@ -1,7 +1,7 @@
 schema: xgc2.product.v1
 id: xgc2-field-panel
 name: XGC2 Field Panel
-version: 0.1.0-5
+version: 0.1.0-6
 kind: ros1-apt
 summary: Onboard field Web panel. Starts or stops roslaunch on the robot and
   talks official ROS messages only. Does not Depend on vehicle or algorithm
@@ -61,7 +61,7 @@ release:
   workflow: release.yml
   ci_workflow: ci.yml
   apt_versions:
-    bionic: 0.1.0-5
-    focal: 0.1.0-5
-    jammy: 0.1.0-5
-    noble: 0.1.0-5
+    bionic: 0.1.0-6
+    focal: 0.1.0-6
+    jammy: 0.1.0-6
+    noble: 0.1.0-6
